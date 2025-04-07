@@ -1,0 +1,15 @@
+[package]
+name = "runners-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ratatui = "0.29.0"
+crossterm = "0.28.1"
+color-eyre = "0.6.3"
+reqwest = { version = "0.12.15", features = ["json"] }
+tokio = { version = "1.44.1", features = ["full"] }
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"
+anyhow = "1.0.97"
+cli-log = "2.1.0"
