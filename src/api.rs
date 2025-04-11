@@ -45,8 +45,8 @@ impl<'c> RunnersEndpoint<'c> {
 
 #[derive(Debug, Deserialize)]
 pub struct RunnersGroupResponse {
-    total_count: usize,
-    runner_groups: Vec<ApiRunnerGroup>,
+    pub total_count: usize,
+    pub runner_groups: Vec<ApiRunnerGroup>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -59,9 +59,9 @@ pub enum RunnerGroupVisibility {
 
 #[derive(Debug, Deserialize)]
 pub struct ApiRunnerGroup {
-    id: usize,
-    name: String,
-    visibility: RunnerGroupVisibility,
+    pub id: usize,
+    pub name: String,
+    pub visibility: RunnerGroupVisibility,
     default: bool,
     selected_repositories_url: Option<String>,
     runners_url: String,
@@ -82,24 +82,24 @@ pub struct ApiRunnerGroupCreate {
 
 pub struct RunnersGroupsEndpoint<'c>(&'c Client);
 impl<'c> RunnersGroupsEndpoint<'c> {
-    fn endpoint(&self) -> Result<Url> {
-        Ok(self.0.api_base.join("runner-groups")?)
+    fn endpoint(&self, path: &str) -> Result<Url> {
+        Ok(self.0.api_base.join(path)?)
     }
 
     pub async fn get_all(&self) -> Result<RunnersGroupResponse> {
-        let endpoint = self.endpoint()?;
+        let endpoint = self.endpoint("runner-groups")?;
         debug!("GET {}", endpoint);
         Ok(self.0.client.get(endpoint).send().await?.json::<RunnersGroupResponse>().await?)
     }
 
     pub async fn get_runners(&self, group_id: usize) -> Result<RunnersResponse> {
-        let endpoint = self.endpoint()?.join(&format!("/{}/hosted-runners", group_id))?;
+        let endpoint = self.endpoint(&format!("runner-groups/{}/runners", group_id))?;
         debug!("GET {}", endpoint);
         Ok(self.0.client.get(endpoint).send().await?.json::<RunnersResponse>().await?)
     }
 
     pub async fn create_runner_group(&self, runner_group: ApiRunnerGroupCreate) -> Result<ApiRunnerGroup> {
-        let endpoint = self.endpoint()?;
+        let endpoint = self.endpoint("runner-groups")?;
         debug!("POST {} : {:?}", endpoint, runner_group);
         Ok(self.0.client.post(endpoint).json(&runner_group).send().await?.json::<ApiRunnerGroup>().await?)
     }
@@ -121,6 +121,8 @@ pub struct ApiRunner {
     pub busy: bool,
     pub ephemeral: Option<bool>,
     pub labels: Vec<APILabel>,
+    #[serde(skip_deserializing)]
+    pub group_id: usize,
 }
 
 #[derive(Serialize, Deserialize, Debug)]

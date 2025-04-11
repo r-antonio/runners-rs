@@ -7,6 +7,7 @@ use std::{thread};
 use std::fmt::Write;
 use std::ops::Deref;
 use std::rc::{Rc, Weak};
+use std::sync::Arc;
 use std::time::Duration;
 use cli_log::*;
 use ratatui::{
@@ -26,7 +27,7 @@ use ratatui::{
     DefaultTerminal,
 };
 use reqwest::header::{HeaderMap, HeaderValue};
-use crate::api::{ApiRunner, Client};
+use crate::api::{ApiRunner, ApiRunnerGroup, Client, RunnerGroupVisibility};
 use crate::config::{read_dot_env, Config};
 
 const TODO_HEADER_STYLE: Style = Style::new().fg(SLATE.c100).bg(BLUE.c800);
@@ -81,15 +82,28 @@ impl Runner {
     }
 }
 
-enum RunnerGroupVisibility {
-    All,
-    Selected,
-}
-
 struct RunnerGroup {
     id: usize,
     name: String,
     visibility: RunnerGroupVisibility,
+}
+
+impl RunnerGroup {
+    fn new(id: usize, name: String, visibility: RunnerGroupVisibility) -> Self {
+        RunnerGroup {
+            id, name, visibility
+        }
+    }
+}
+
+impl From<ApiRunnerGroup> for RunnerGroup {
+    fn from(group: ApiRunnerGroup) -> Self {
+        RunnerGroup::new(
+            group.id,
+            group.name,
+            group.visibility
+        )
+    }
 }
 
 struct RunnerList {
@@ -110,6 +124,7 @@ impl RunnerList {
 
 
 struct AppState<'a> {
+    runner_groups: Vec<RunnerGroup>,
     runners: RunnerList,
     selected_tab: Tab,
     selected_runner: Option<usize>,
@@ -125,23 +140,49 @@ impl <'a> Widget for &mut AppState<'a> {
             Constraint::Length(2),
             Constraint::Fill(1),
             Constraint::Length(1),
-        ])
-            .areas(area);
-
+        ]).areas(area);
         let [list_area, item_area] =
             Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).areas(main_area);
 
-        AppState::render_header(header_area, buf);
-        AppState::render_footer(footer_area, buf);
-        self.render_list(list_area, buf);
-        self.render_selected_item(item_area, buf);
+        match self.selected_tab {
+            Tab::Runners => {
+                AppState::render_header(header_area, buf);
+                AppState::render_footer(footer_area, buf);
+                self.render_list(main_area, buf);
+                //self.render_selected_item(item_area, buf);
+            },
+            Tab::RunnerOpSelection => {
+                let mut list_title = String::from("Select operation");
+                let block = Block::new()
+                    .title(Line::raw(list_title).centered())
+                    .borders(Borders::TOP)
+                    .border_set(symbols::border::EMPTY)
+                    .border_style(TODO_HEADER_STYLE)
+                    .bg(NORMAL_ROW_BG);
+
+                let items: Vec<ListItem> = vec![
+                    ListItem::from("Add label"),
+                    ListItem::from("Remove label"),
+                    ListItem::from("Add to group"),
+                ];
+                let list = List::new(items)
+                    .block(block)
+                    .highlight_style(SELECTED_STYLE)
+                    .highlight_symbol(">")
+                    .highlight_spacing(HighlightSpacing::Always);;
+                StatefulWidget::render(list, area, buf, &mut self.runners.state);
+            },
+            Tab::RunnerGroups => {}
+        }
+
     }
 }
 
 impl <'a> AppState<'a> {
-    fn new(runners: RunnerList, selected_tab: Tab, tx: &'a mpsc::UnboundedSender<BackendMessage>, api_rx: mpsc::UnboundedReceiver<ApiMessage>) -> Self {
+    fn new(runners: RunnerList, runner_groups: Vec<RunnerGroup>, selected_tab: Tab, tx: &'a mpsc::UnboundedSender<BackendMessage>, api_rx: mpsc::UnboundedReceiver<ApiMessage>) -> Self {
         let mut state = AppState {
             runners,
+            runner_groups,
             selected_tab,
             selected_runner: None,
             input_buffer: String::new(),
@@ -163,7 +204,8 @@ impl <'a> AppState<'a> {
             }
             if let Ok(message) = self.api_rx.try_recv() {
                 match message {
-                    ApiMessage::RunnerList(runners) => self.set_runners(runners)
+                    ApiMessage::RunnerList(runners) => self.set_runners(runners),
+                    ApiMessage::RunnerGroupList(groups) => self.set_runner_groups(groups),
                 }
             }
         }
@@ -174,25 +216,38 @@ impl <'a> AppState<'a> {
         if key.kind != KeyEventKind::Press {
             return;
         }
-        match key.code {
-            KeyCode::Esc => self.should_exit = true,
-            KeyCode::Left => self.select_none(),
-            KeyCode::Down => self.select_next(),
-            KeyCode::Up => self.select_previous(),
-            KeyCode::Home => self.select_first(),
-            KeyCode::End => self.select_last(),
-            KeyCode::Right | KeyCode::Enter => {
-                self.toggle_status();
-            }
-            KeyCode::Tab => self.selected_tab = match self.selected_tab {
-                Tab::Runners => Tab::RunnerOpSelection,
-                Tab::RunnerGroups => Tab::Runners,
-                Tab::RunnerOpSelection => Tab::RunnerOpSelection
+        match self.selected_tab {
+            Tab::Runners => match key.code {
+                KeyCode::Esc => self.should_exit = true,
+                KeyCode::Left => match self.selected_tab {
+                    Tab::Runners => self.select_none(),
+                    Tab::RunnerGroups => {},
+                    Tab::RunnerOpSelection => self.select_none(),
+                },
+                KeyCode::Down => self.select_next(),
+                KeyCode::Up => self.select_previous(),
+                KeyCode::Home => self.select_first(),
+                KeyCode::End => self.select_last(),
+                KeyCode::Right | KeyCode::Enter => match self.selected_tab {
+                    Tab::Runners => self.toggle_status(),
+                    Tab::RunnerGroups => {},
+                    Tab::RunnerOpSelection => self.toggle_status(),
+                },
+                KeyCode::Tab => self.selected_tab = match self.selected_tab {
+                    Tab::Runners => Tab::RunnerOpSelection,
+                    Tab::RunnerGroups => Tab::Runners,
+                    Tab::RunnerOpSelection => Tab::RunnerOpSelection
+                },
+                KeyCode::Backspace => self.remove_last_input(),
+                KeyCode::Char(c) => self.update_filter(c),
+                _ => {}
             },
-            KeyCode::Backspace => self.remove_last_input(),
-            KeyCode::Char(c) => self.update_filter(c),
-            _ => {}
+            Tab::RunnerOpSelection => {
+                todo!("add operations changes")
+            }
+            Tab::RunnerGroups => {}
         }
+
     }
 
     fn render_header(area: Rect, buf: &mut Buffer) {
@@ -209,7 +264,7 @@ impl <'a> AppState<'a> {
     }
 
     fn render_list(&mut self, area: Rect, buf: &mut Buffer) {
-        let mut list_title = String::from("TODO List - ");
+        let mut list_title = String::from("Runners - ");
         list_title.push_str(self.input_buffer.as_str());
         let block = Block::new()
             .title(Line::raw(list_title).centered())
@@ -294,16 +349,10 @@ impl <'a> AppState<'a> {
 
     /// Changes the status of the selected list item
     fn toggle_status(&mut self) {
-        println!("Here is supposed to select the runner and show another menu!");
-        self.tx.send(BackendMessage::FetchRunners);
-        // if let Some(i) = self.runners.state.selected() {
-        //     let mut runner = self.runners.items[i].as_ref().borrow_mut();
-        //     runner.status = match runner.status {
-        //         RunnerStatus::Online => RunnerStatus::Offline,
-        //         RunnerStatus::Offline => RunnerStatus::Online,
-        //         RunnerStatus::Busy => RunnerStatus::Busy,
-        //     }
-        // }
+        if let Some(i) = self.runners.state.selected() {
+            self.selected_runner = self.runners.state.selected();
+            self.selected_tab = Tab::RunnerOpSelection;
+        }
     }
 
     fn remove_last_input(&mut self) {
@@ -314,6 +363,10 @@ impl <'a> AppState<'a> {
     fn set_runners(&mut self, runners: Vec<Runner>) {
         self.runners.items = runners.into_iter().map(|r| Rc::new(r)).collect();
         self.filter_items();
+    }
+
+    fn set_runner_groups(&mut self, groups: Vec<RunnerGroup>) {
+        self.runner_groups = groups;
     }
 
     fn update_filter(&mut self, c: char) {
@@ -331,12 +384,15 @@ impl <'a> AppState<'a> {
 
 impl From<&Runner> for ListItem<'_> {
     fn from(value: &Runner) -> Self {
+        let group_name = if let Some(group) = &value.group { group } else { &"default".to_string()};
+        let labels = value.labels.join(" | ");
+        let text = format!("{} ({}) | {}", &value.name, &group_name, &labels);
         let line = match value.status {
-            RunnerStatus::Online => Line::styled(format!(" ☐ {}", &value.name), TEXT_FG_COLOR),
+            RunnerStatus::Online => Line::styled(format!(" ✓ {}", &text), TEXT_FG_COLOR),
             RunnerStatus::Offline => {
-                Line::styled(format!(" ✓ {}", &value.name), COMPLETED_TEXT_FG_COLOR)
+                Line::styled(format!(" x {}", &text), COMPLETED_TEXT_FG_COLOR)
             }
-            RunnerStatus::Busy => Line::styled(format!(" x {}", &value.name), TEXT_FG_COLOR)
+            RunnerStatus::Busy => Line::styled(format!(" ☐ {}", &text), TEXT_FG_COLOR)
         };
         ListItem::new(line)
     }
@@ -360,6 +416,7 @@ enum BackendMessage {
 
 enum ApiMessage {
     RunnerList(Vec<Runner>),
+    RunnerGroupList(Vec<RunnerGroup>),
 }
 
 #[tokio::main]
@@ -374,12 +431,13 @@ async fn main() -> Result<()> {
 
     let mut app_state = AppState::new(
         RunnerList::new(vec!(), ListState::default()),
+        vec!(),
         Tab::Runners,
         &tx,
         api_rx
     );
 
-    let worker = tokio::spawn(async move {
+    let _worker = tokio::spawn(async move {
         backend_worker(rx, &api_tx, config).await
     });
 
@@ -416,14 +474,36 @@ async fn backend_worker(mut rx: mpsc::UnboundedReceiver<BackendMessage>, tx: &mp
     headers.insert("Authorization", HeaderValue::from_str(&format!("Bearer {}", config.token)).unwrap());
     let github_client = Client::new(&format!("https://api.github.com/orgs/{}/actions/", config.organization), headers)
         .expect("Failed to create github client");
+    let client = Arc::new(github_client);
 
     while let Some(message) = rx.recv().await {
         match message {
             BackendMessage::FetchRunners => {
-                // simulate api call
-                let runners_api = github_client.runners().get_all().await.unwrap();
-                debug!("Fetched runners {:?}", runners_api);
-                let runners = runners_api.runners.into_iter().map(| r| Runner::from(r)).collect();
+                let groups_api = client.runner_groups().get_all().await.unwrap();
+                let group_ids: Vec<(usize, String)> = groups_api.runner_groups.iter().map(|g| (g.id, g.name.clone())).collect();
+                let groups = groups_api.runner_groups
+                    .into_iter()
+                    .map(|g|RunnerGroup::from(g))
+                    .collect();
+                tx.send(ApiMessage::RunnerGroupList(groups))
+                    .expect("Could not sent command to backend worker");
+                let futures = group_ids
+                    .into_iter()
+                    .map(|(id, name)| {
+                        let client_clone = Arc::clone(&client);
+                        async move {
+                            let runners_api = client_clone.runner_groups().get_runners(id).await.unwrap().runners;
+                            runners_api.into_iter().map(|r| {
+                                let mut runner = Runner::from(r);
+                                runner.group = Some(name.clone());
+                                runner
+                            }).collect()
+                        }
+                    } );
+                let results: Vec<Vec<Runner>> = futures::future::join_all(futures).await;
+                let runners: Vec<Runner> = results.into_iter()
+                    .flatten().collect();
+                debug!("Fetched runners {:?}", runners);
                 tx.send(ApiMessage::RunnerList(runners))
                     .expect("Could not send runner list to ui");
             }
