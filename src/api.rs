@@ -1,11 +1,9 @@
 use anyhow::Result;
-use reqwest::{Error, StatusCode, Url};
-use std::sync::{Arc, RwLock};
-use reqwest::header::HeaderMap;
-use serde::{Deserialize, Serialize};
-use tokio;
 use cli_log::*;
-use crate::RunnerGroup;
+use reqwest::header::HeaderMap;
+use reqwest::{Url};
+use serde::{Deserialize, Serialize};
+use std::sync::{Arc};
 
 pub struct Client {
     api_base: Url,

@@ -1,15 +1,14 @@
 mod api;
 mod config;
+mod runners;
+mod backend;
+mod ui;
 
-use tokio::sync::mpsc;
-use color_eyre::Result;
-use std::{thread};
-use std::fmt::Write;
-use std::ops::Deref;
-use std::rc::{Rc, Weak};
-use std::sync::Arc;
-use std::time::Duration;
+use crate::backend::{ApiMessage, BackendMessage, Worker};
+use crate::config::read_dot_env;
+use crate::runners::{Runner, RunnerGroup, RunnerStatus};
 use cli_log::*;
+use color_eyre::Result;
 use ratatui::{
     buffer::Buffer,
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
@@ -26,9 +25,15 @@ use ratatui::{
     },
     DefaultTerminal,
 };
-use reqwest::header::{HeaderMap, HeaderValue};
-use crate::api::{ApiRunner, ApiRunnerGroup, Client, RunnerGroupVisibility};
-use crate::config::{read_dot_env, Config};
+use std::fmt::Write;
+use std::ops::Deref;
+use std::rc::{Rc, Weak};
+use std::time::Duration;
+use color_eyre::owo_colors::OwoColorize;
+use crossterm::event::KeyModifiers;
+use ratatui::widgets::{BorderType, Tabs};
+use tokio::sync::mpsc;
+use crate::ui::{Operation, Popup};
 
 const TODO_HEADER_STYLE: Style = Style::new().fg(SLATE.c100).bg(BLUE.c800);
 const NORMAL_ROW_BG: Color = SLATE.c950;
@@ -36,75 +41,6 @@ const ALT_ROW_BG_COLOR: Color = SLATE.c900;
 const SELECTED_STYLE: Style = Style::new().bg(SLATE.c800).add_modifier(Modifier::BOLD);
 const TEXT_FG_COLOR: Color = SLATE.c200;
 const COMPLETED_TEXT_FG_COLOR: Color = GREEN.c500;
-
-#[derive(Debug, Clone)]
-enum RunnerStatus {
-    Online,
-    Offline,
-    Busy,
-}
-
-#[derive(Debug, Clone)]
-struct Runner {
-    id: usize,
-    status: RunnerStatus,
-    name: String,
-    labels: Vec<String>,
-    group: Option<String>,
-}
-
-impl From<ApiRunner> for Runner {
-    fn from(runner: ApiRunner) -> Self {
-        let status = if runner.busy {
-            RunnerStatus::Busy
-        } else {
-            RunnerStatus::Online
-        };
-        Runner::new(
-            runner.id,
-            status,
-            runner.name,
-            runner.labels.iter().map(|x| x.name.to_string()).collect(),
-            None
-        )
-    }
-}
-
-impl Runner {
-    fn new(id: usize, status: RunnerStatus, name: String, labels: Vec<String>, group: Option<String>) -> Self {
-        Runner {
-            id,
-            status,
-            name,
-            labels,
-            group,
-        }
-    }
-}
-
-struct RunnerGroup {
-    id: usize,
-    name: String,
-    visibility: RunnerGroupVisibility,
-}
-
-impl RunnerGroup {
-    fn new(id: usize, name: String, visibility: RunnerGroupVisibility) -> Self {
-        RunnerGroup {
-            id, name, visibility
-        }
-    }
-}
-
-impl From<ApiRunnerGroup> for RunnerGroup {
-    fn from(group: ApiRunnerGroup) -> Self {
-        RunnerGroup::new(
-            group.id,
-            group.name,
-            group.visibility
-        )
-    }
-}
 
 struct RunnerList {
     items: Vec<Rc<Runner>>,
@@ -122,14 +58,55 @@ impl RunnerList {
     }
 }
 
+struct UIList<T> {
+    items: Vec<Rc<T>>,
+    filtered_items: Vec<Weak<T>>,
+    state: ListState,
+}
+
+impl <T> UIList<T> {
+    fn new(vec: Vec<T>) -> Self {
+        let items: Vec<Rc<T>> = vec.into_iter().map(Rc::new).collect();
+        let filtered_items = items.iter().map(Rc::downgrade).collect();
+        UIList {
+            items,
+            filtered_items,
+            state: ListState::default(),
+        }
+    }
+    fn with_first_selected(mut self) -> Self {
+        self.select_first();
+        self
+    }
+    fn select_first(&mut self) {
+        self.state.select_first();
+    }
+
+    fn select_last(&mut self) {
+        self.state.select_last();
+    }
+    fn select_next(&mut self) {
+        self.state.select_next();
+    }
+
+    fn select_previous(&mut self) {
+        self.state.select_previous();
+    }
+
+    fn select_none(&mut self) {
+        self.state.select(None);
+    }
+}
 
 struct AppState<'a> {
     runner_groups: Vec<RunnerGroup>,
-    runners: RunnerList,
+    runners: UIList<Runner>,
+    runner_ops: UIList<Operation>,
     selected_tab: Tab,
     selected_runner: Option<usize>,
     input_buffer: String,
     should_exit: bool,
+    show_popup: bool,
     tx: &'a mpsc::UnboundedSender<BackendMessage>,
     api_rx: mpsc::UnboundedReceiver<ApiMessage>,
 }
@@ -137,40 +114,50 @@ struct AppState<'a> {
 impl <'a> Widget for &mut AppState<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let [header_area, main_area, footer_area] = Layout::vertical([
-            Constraint::Length(2),
+            Constraint::Length(1),
             Constraint::Fill(1),
             Constraint::Length(1),
         ]).areas(area);
-        let [list_area, item_area] =
-            Layout::vertical([Constraint::Fill(1), Constraint::Fill(1)]).areas(main_area);
 
+        self.render_header(header_area, buf);
+        AppState::render_footer(footer_area, buf);
         match self.selected_tab {
             Tab::Runners => {
-                AppState::render_header(header_area, buf);
-                AppState::render_footer(footer_area, buf);
                 self.render_list(main_area, buf);
-                //self.render_selected_item(item_area, buf);
             },
             Tab::RunnerOpSelection => {
-                let mut list_title = String::from("Select operation");
+                let idx = self.selected_runner.unwrap();
+                let list_title = format!("Select operation - {}", self.runners.items[idx].name);
                 let block = Block::new()
                     .title(Line::raw(list_title).centered())
                     .borders(Borders::TOP)
                     .border_set(symbols::border::EMPTY)
-                    .border_style(TODO_HEADER_STYLE)
+                    .border_style(self.selected_tab.style())
+                    //.border_style(TODO_HEADER_STYLE)
                     .bg(NORMAL_ROW_BG);
 
-                let items: Vec<ListItem> = vec![
-                    ListItem::from("Add label"),
-                    ListItem::from("Remove label"),
-                    ListItem::from("Add to group"),
-                ];
+                let items: Vec<ListItem> = self.runner_ops.items
+                    .iter()
+                    .map(|op|ListItem::from(op.deref()))
+                    .collect();
                 let list = List::new(items)
                     .block(block)
                     .highlight_style(SELECTED_STYLE)
                     .highlight_symbol(">")
-                    .highlight_spacing(HighlightSpacing::Always);;
-                StatefulWidget::render(list, area, buf, &mut self.runners.state);
+                    .highlight_spacing(HighlightSpacing::Always);
+                StatefulWidget::render(list, main_area, buf, &mut self.runner_ops.state);
+                if self.show_popup {
+                    let popup_area = Rect {
+                        x: main_area.width / 4,
+                        y: main_area.height / 3,
+                        width: main_area.width / 2,
+                        height: 3,
+                    };
+                    Popup::default()
+                        .title("Input new label")
+                        .content(format!("{}_", self.input_buffer.as_str()))
+                        .render(popup_area, buf);
+                }
             },
             Tab::RunnerGroups => {}
         }
@@ -179,18 +166,20 @@ impl <'a> Widget for &mut AppState<'a> {
 }
 
 impl <'a> AppState<'a> {
-    fn new(runners: RunnerList, runner_groups: Vec<RunnerGroup>, selected_tab: Tab, tx: &'a mpsc::UnboundedSender<BackendMessage>, api_rx: mpsc::UnboundedReceiver<ApiMessage>) -> Self {
+    fn new(runners: Vec<Runner>, runner_groups: Vec<RunnerGroup>, selected_tab: Tab, tx: &'a mpsc::UnboundedSender<BackendMessage>, api_rx: mpsc::UnboundedReceiver<ApiMessage>) -> Self {
+        let runner_operations = Operation::all();
         let mut state = AppState {
-            runners,
+            runners: UIList::new(runners).with_first_selected(),
+            runner_ops: UIList::new(runner_operations).with_first_selected(),
             runner_groups,
             selected_tab,
             selected_runner: None,
             input_buffer: String::new(),
             should_exit: false,
+            show_popup: false,
             tx,
             api_rx
         };
-        state.filter_items();
         state
     }
 
@@ -216,44 +205,77 @@ impl <'a> AppState<'a> {
         if key.kind != KeyEventKind::Press {
             return;
         }
+        if key.code == KeyCode::Esc {
+            if self.show_popup {
+                self.show_popup = false;
+            } else {
+                self.should_exit = true;
+            }
+            return;
+        }
+        if key.code == KeyCode::Tab {
+            self.selected_tab = match self.selected_tab {
+                Tab::Runners => Tab::RunnerGroups,
+                Tab::RunnerGroups => Tab::Runners,
+                Tab::RunnerOpSelection => Tab::RunnerOpSelection
+            }
+        }
         match self.selected_tab {
             Tab::Runners => match key.code {
-                KeyCode::Esc => self.should_exit = true,
                 KeyCode::Left => match self.selected_tab {
-                    Tab::Runners => self.select_none(),
+                    Tab::Runners => self.runners.select_none(),
                     Tab::RunnerGroups => {},
-                    Tab::RunnerOpSelection => self.select_none(),
+                    Tab::RunnerOpSelection => self.runner_ops.select_none(),
                 },
-                KeyCode::Down => self.select_next(),
-                KeyCode::Up => self.select_previous(),
-                KeyCode::Home => self.select_first(),
-                KeyCode::End => self.select_last(),
+                KeyCode::Down => self.runners.select_next(),
+                KeyCode::Up => self.runners.select_previous(),
+                KeyCode::Home => self.runners.select_first(),
+                KeyCode::End => self.runners.select_last(),
                 KeyCode::Right | KeyCode::Enter => match self.selected_tab {
                     Tab::Runners => self.toggle_status(),
                     Tab::RunnerGroups => {},
                     Tab::RunnerOpSelection => self.toggle_status(),
-                },
-                KeyCode::Tab => self.selected_tab = match self.selected_tab {
-                    Tab::Runners => Tab::RunnerOpSelection,
-                    Tab::RunnerGroups => Tab::Runners,
-                    Tab::RunnerOpSelection => Tab::RunnerOpSelection
                 },
                 KeyCode::Backspace => self.remove_last_input(),
                 KeyCode::Char(c) => self.update_filter(c),
                 _ => {}
             },
             Tab::RunnerOpSelection => {
-                todo!("add operations changes")
+                match key.code {
+                    KeyCode::Up => self.runner_ops.select_previous(),
+                    KeyCode::Down => self.runner_ops.select_next(),
+                    KeyCode::Enter => if !self.show_popup { self.show_input_popup() },
+                    KeyCode::Left => self.selected_tab = Tab::Runners,
+                    KeyCode::Char(c) => self.add_to_input(c),
+                    KeyCode::Backspace => self.remove_last_input(),
+                    _ => {}
+                }
             }
-            Tab::RunnerGroups => {}
+            Tab::RunnerGroups => {
+                match key.code {
+                    _ => {}
+                }
+            }
         }
 
     }
 
-    fn render_header(area: Rect, buf: &mut Buffer) {
-        Paragraph::new("Ratatui List Example")
-            //.bold()
-            .centered()
+    fn render_header(&self, area: Rect, buf: &mut Buffer) {
+        let titles = Tab::menu().into_iter().map(|t|t.as_str());
+        let selected_idx = Tab::menu()
+            .into_iter()
+            .enumerate()
+            .find(|(i, tab)| self.selected_tab == *tab)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        Tabs::new(titles)
+            .select(selected_idx)
+            .padding("", "")
+            .divider(" ")
+            .style(Style::default()
+                .bg(Color::Black)
+                .fg(Color::White))
+            .highlight_style(self.selected_tab.style())
             .render(area, buf);
     }
 
@@ -270,13 +292,13 @@ impl <'a> AppState<'a> {
             .title(Line::raw(list_title).centered())
             .borders(Borders::TOP)
             .border_set(symbols::border::EMPTY)
-            .border_style(TODO_HEADER_STYLE)
+            .border_style(self.selected_tab.style())
             .bg(NORMAL_ROW_BG);
 
         // Iterate through all elements in the `items` and stylize them.
         let items: Vec<ListItem> = self
             .runners
-            .items_filtered
+            .filtered_items
             .iter()
             .enumerate()
             .map(|(i, r)| {
@@ -298,61 +320,20 @@ impl <'a> AppState<'a> {
         StatefulWidget::render(list, area, buf, &mut self.runners.state);
     }
 
-    fn render_selected_item(&self, area: Rect, buf: &mut Buffer) {
-        // We get the info depending on the item's state.
-        let info = if let Some(i) = self.runners.state.selected() {
-            let runner = self.runners.items[i].as_ref();
-            match runner.status {
-                RunnerStatus::Online => format!("✓ DONE: {}", runner.name),
-                RunnerStatus::Offline => format!("☐ TODO: {}", runner.name),
-                RunnerStatus::Busy => format!("")
-            }
-        } else {
-            "Nothing selected...".to_string()
-        };
-
-        // We show the list item's info under the list in this paragraph
-        let block = Block::new()
-            .title(Line::raw("TODO Info").centered())
-            .borders(Borders::TOP)
-            .border_set(symbols::border::EMPTY)
-            .border_style(TODO_HEADER_STYLE)
-            .bg(NORMAL_ROW_BG)
-            .padding(Padding::horizontal(1));
-
-        // We can now render the item info
-        Paragraph::new(info)
-            .block(block)
-            .fg(TEXT_FG_COLOR)
-            .wrap(Wrap { trim: false })
-            .render(area, buf);
-    }
-
-    fn select_none(&mut self) {
-        self.runners.state.select(None);
-    }
-
-    fn select_next(&mut self) {
-        self.runners.state.select_next();
-    }
-    fn select_previous(&mut self) {
-        self.runners.state.select_previous();
-    }
-
-    fn select_first(&mut self) {
-        self.runners.state.select_first();
-    }
-
-    fn select_last(&mut self) {
-        self.runners.state.select_last();
+    fn show_input_popup(&mut self) {
+        self.show_popup = true;
     }
 
     /// Changes the status of the selected list item
     fn toggle_status(&mut self) {
-        if let Some(i) = self.runners.state.selected() {
+        if let Some(_) = self.runners.state.selected() {
             self.selected_runner = self.runners.state.selected();
             self.selected_tab = Tab::RunnerOpSelection;
         }
+    }
+
+    fn add_to_input(&mut self, c: char) {
+        self.input_buffer.write_char(c).unwrap();
     }
 
     fn remove_last_input(&mut self) {
@@ -370,53 +351,48 @@ impl <'a> AppState<'a> {
     }
 
     fn update_filter(&mut self, c: char) {
-        self.input_buffer.write_char(c).unwrap();
+        self.add_to_input(c);
         self.filter_items();
     }
 
     fn filter_items(&mut self) {
-        self.runners.items_filtered = self.runners.items.iter()
+        self.runners.filtered_items = self.runners.items.iter()
             .filter(|r| r.name.contains(&self.input_buffer))
             .map(|r| Rc::downgrade(r))
             .collect()
     }
 }
 
-impl From<&Runner> for ListItem<'_> {
-    fn from(value: &Runner) -> Self {
-        let group_name = if let Some(group) = &value.group { group } else { &"default".to_string()};
-        let labels = value.labels.join(" | ");
-        let text = format!("{} ({}) | {}", &value.name, &group_name, &labels);
-        let line = match value.status {
-            RunnerStatus::Online => Line::styled(format!(" ✓ {}", &text), TEXT_FG_COLOR),
-            RunnerStatus::Offline => {
-                Line::styled(format!(" x {}", &text), COMPLETED_TEXT_FG_COLOR)
-            }
-            RunnerStatus::Busy => Line::styled(format!(" ☐ {}", &text), TEXT_FG_COLOR)
-        };
-        ListItem::new(line)
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 enum Tab {
     Runners,
     RunnerGroups,
     RunnerOpSelection
 }
 
-// messages for backend communication
-enum BackendMessage {
-    FetchRunners,
-    AddLabel(usize, String),
-    DeleteLabel(usize, String),
-    ChangeGroup(usize, usize),
-    AddRepoToGroup(usize, usize),
-}
+impl Tab {
+    fn menu() -> Vec<Tab> {
+        vec![Tab::Runners, Tab::RunnerGroups]
+    }
+    fn all() -> Vec<Tab> {
+        vec![Tab::Runners,Tab::RunnerGroups,Tab::RunnerOpSelection]
+    }
 
-enum ApiMessage {
-    RunnerList(Vec<Runner>),
-    RunnerGroupList(Vec<RunnerGroup>),
+    fn as_str(&self) -> &'static str {
+        match self {
+            Tab::Runners => " Runners ",
+            Tab::RunnerGroups => " Runner Groups ",
+            Tab::RunnerOpSelection => " RunnerOpSelection "
+        }
+    }
+
+    fn style(&self) -> Style {
+        match self {
+            Tab::Runners => TODO_HEADER_STYLE,
+            Tab::RunnerGroups => TODO_HEADER_STYLE.bg(Color::Green),
+            Tab::RunnerOpSelection => TODO_HEADER_STYLE.bg(Color::Red)
+        }
+    }
 }
 
 #[tokio::main]
@@ -426,38 +402,26 @@ async fn main() -> Result<()> {
         .expect("Could not read config file");
     let (tx, rx) = mpsc::unbounded_channel();
     let (api_tx, api_rx) = mpsc::unbounded_channel();
+    let mut worker = Worker::new(rx, api_tx, &config);
     color_eyre::install()?;
     let terminal = ratatui::init();
 
-    let mut app_state = AppState::new(
-        RunnerList::new(vec!(), ListState::default()),
+    let runners = worker.get_runners().await;
+    let app_state = AppState::new(
+        runners,
         vec!(),
         Tab::Runners,
         &tx,
         api_rx
     );
 
-    let _worker = tokio::spawn(async move {
-        backend_worker(rx, &api_tx, config).await
+    tokio::spawn(async move {
+        worker.run().await
     });
-
-    tx.send(BackendMessage::FetchRunners)
-        .expect("Could not sent command to backend");
 
     let app_result = app_state.run(terminal);
     ratatui::restore();
     app_result
-}
-
-struct Worker {
-    client: Client,
-    rx: mpsc::UnboundedReceiver<BackendMessage>
-}
-
-impl Worker {
-    fn new(client: Client, rx: mpsc::UnboundedReceiver<BackendMessage>) -> Self {
-        Worker { client, rx }
-    }
 }
 
 const fn alternate_colors(i: usize) -> Color {
@@ -465,60 +429,5 @@ const fn alternate_colors(i: usize) -> Color {
         NORMAL_ROW_BG
     } else {
         ALT_ROW_BG_COLOR
-    }
-}
-
-async fn backend_worker(mut rx: mpsc::UnboundedReceiver<BackendMessage>, tx: &mpsc::UnboundedSender<ApiMessage>, config: Config) {
-    let mut headers = HeaderMap::new();
-    headers.insert("User-Agent", HeaderValue::from_str("curl").unwrap());
-    headers.insert("Authorization", HeaderValue::from_str(&format!("Bearer {}", config.token)).unwrap());
-    let github_client = Client::new(&format!("https://api.github.com/orgs/{}/actions/", config.organization), headers)
-        .expect("Failed to create github client");
-    let client = Arc::new(github_client);
-
-    while let Some(message) = rx.recv().await {
-        match message {
-            BackendMessage::FetchRunners => {
-                let groups_api = client.runner_groups().get_all().await.unwrap();
-                let group_ids: Vec<(usize, String)> = groups_api.runner_groups.iter().map(|g| (g.id, g.name.clone())).collect();
-                let groups = groups_api.runner_groups
-                    .into_iter()
-                    .map(|g|RunnerGroup::from(g))
-                    .collect();
-                tx.send(ApiMessage::RunnerGroupList(groups))
-                    .expect("Could not sent command to backend worker");
-                let futures = group_ids
-                    .into_iter()
-                    .map(|(id, name)| {
-                        let client_clone = Arc::clone(&client);
-                        async move {
-                            let runners_api = client_clone.runner_groups().get_runners(id).await.unwrap().runners;
-                            runners_api.into_iter().map(|r| {
-                                let mut runner = Runner::from(r);
-                                runner.group = Some(name.clone());
-                                runner
-                            }).collect()
-                        }
-                    } );
-                let results: Vec<Vec<Runner>> = futures::future::join_all(futures).await;
-                let runners: Vec<Runner> = results.into_iter()
-                    .flatten().collect();
-                debug!("Fetched runners {:?}", runners);
-                tx.send(ApiMessage::RunnerList(runners))
-                    .expect("Could not send runner list to ui");
-            }
-            BackendMessage::AddLabel(runner_id, label) => {
-                println!("Updating label: {} for runner: {}", label, runner_id);
-            }
-            BackendMessage::DeleteLabel(runner_id, label) => {
-                todo!()
-            }
-            BackendMessage::ChangeGroup(runner_id, group_id) => {
-                todo!()
-            }
-            BackendMessage::AddRepoToGroup(repo_id, group_id) => {
-                todo!()
-            }
-        }
     }
 }
