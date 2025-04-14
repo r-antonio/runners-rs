@@ -3,6 +3,10 @@ use ratatui::widgets::ListItem;
 use crate::api::{ApiRunner, ApiRunnerGroup, RunnerGroupVisibility};
 use crate::{COMPLETED_TEXT_FG_COLOR, TEXT_FG_COLOR};
 
+pub trait ToLine {
+    fn to_line(&self) -> Line;
+}
+
 #[derive(Debug, Clone)]
 pub enum RunnerStatus {
     Online,
@@ -17,6 +21,21 @@ pub struct Runner {
     pub name: String,
     pub labels: Vec<String>,
     pub group: Option<String>,
+}
+
+impl ToLine for Runner {
+    fn to_line(&self) -> Line {
+        let group_name = if let Some(group) = &self.group { group } else { &"default".to_string()};
+        let labels = self.labels.join(" | ");
+        let text = format!("{} ({}) | {}", &self.name, &group_name, &labels);
+        match self.status {
+            RunnerStatus::Online => Line::styled(format!(" ✓ {}", &text), TEXT_FG_COLOR),
+            RunnerStatus::Offline => {
+                Line::styled(format!(" x {}", &text), COMPLETED_TEXT_FG_COLOR)
+            }
+            RunnerStatus::Busy => Line::styled(format!(" ☐ {}", &text), TEXT_FG_COLOR)
+        }
+    }
 }
 
 impl From<ApiRunner> for Runner {
@@ -75,6 +94,21 @@ impl RunnerGroup {
         RunnerGroup {
             id, name, visibility
         }
+    }
+}
+
+impl ToLine for RunnerGroup {
+    fn to_line(&self) -> Line {
+        let text = format!("{} ID: {}", &self.name, &self.id);
+        Line::styled(format!(" {}", &text), TEXT_FG_COLOR)
+    }
+}
+
+impl From<&RunnerGroup> for ListItem<'_> {
+    fn from(value: &RunnerGroup) -> Self {
+        let text = format!("{} ID: {}", &value.name, &value.id);
+        let line = Line::styled(format!(" {}", &text), TEXT_FG_COLOR);
+        ListItem::new(line)
     }
 }
 

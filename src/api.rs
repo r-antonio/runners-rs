@@ -1,13 +1,18 @@
+use std::collections::HashMap;
+use std::ops::Deref;
 use anyhow::Result;
 use cli_log::*;
 use reqwest::header::HeaderMap;
 use reqwest::{Url};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc};
+use std::sync::{Arc, Mutex};
+use crate::cache::Cache;
 
 pub struct Client {
     api_base: Url,
     client: Arc<reqwest::Client>,
+    runners: Arc<Mutex<Cache<RunnersResponse>>>,
+    runner_groups: Arc<Mutex<Cache<RunnersGroupResponse>>>,
 }
 
 impl Client {
@@ -15,7 +20,11 @@ impl Client {
         let api_base = Url::parse(api_base)?;
         let client = Arc::new(reqwest::Client::builder()
             .default_headers(default_headers).build()?);
-        Ok(Client { api_base, client })
+        Ok(Client {
+            api_base,
+            client,
+            runners: Arc::new(Mutex::new(Cache::new())),
+            runner_groups: Arc::new(Mutex::new(Cache::new())) })
     }
 
     pub fn runners(&self) -> RunnersEndpoint {
@@ -27,27 +36,44 @@ impl Client {
     }
 }
 
-pub struct RunnersEndpoint<'c>(&'c Client);
-
-impl<'c> RunnersEndpoint<'c> {
-    fn endpoint(&self) -> Result<Url> {
-        Ok(self.0.api_base.join("runners")?)
-    }
-
-    pub async fn get_all(&self) -> Result<RunnersResponse> {
-        let endpoint = self.endpoint()?;
-        debug!("GET {}", endpoint);
-        Ok(self.0.client.get(endpoint).send().await?.json::<RunnersResponse>().await?)
+trait CustomEndpoint {
+    fn endpoint(&self, base_url: &Url, path: &str) -> Result<Url> {
+        Ok(base_url.join(path)?)
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
+pub struct LabelsBody {
+    labels: Vec<String>
+}
+
+pub struct RunnersEndpoint<'c>(&'c Client);
+
+impl CustomEndpoint for RunnersEndpoint<'_> {}
+
+impl<'c> RunnersEndpoint<'c> {
+    pub async fn get_all(&self) -> Result<RunnersResponse> {
+        let endpoint = self.endpoint(&self.0.api_base, "runners")?;
+        debug!("GET {}", endpoint);
+        Ok(self.0.client.get(endpoint).send().await?.json::<RunnersResponse>().await?)
+    }
+
+    pub async fn add_label(&self, id: usize, labels: Vec<String>) -> Result<()> {
+        let endpoint = self.endpoint(&self.0.api_base, &format!("runners/{}/labels", id))?;
+        debug!("POST {}", endpoint);
+        let body = LabelsBody { labels };
+        self.0.client.post(endpoint).json(&body).send().await?.error_for_status()?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct RunnersGroupResponse {
     pub total_count: usize,
     pub runner_groups: Vec<ApiRunnerGroup>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum RunnerGroupVisibility {
     #[serde(rename = "selected")]
     Selected,
@@ -55,7 +81,7 @@ pub enum RunnerGroupVisibility {
     All,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ApiRunnerGroup {
     pub id: usize,
     pub name: String,
@@ -79,38 +105,55 @@ pub struct ApiRunnerGroupCreate {
 }
 
 pub struct RunnersGroupsEndpoint<'c>(&'c Client);
+impl CustomEndpoint for RunnersGroupsEndpoint<'_> {}
 impl<'c> RunnersGroupsEndpoint<'c> {
-    fn endpoint(&self, path: &str) -> Result<Url> {
-        Ok(self.0.api_base.join(path)?)
+    pub async fn get_all(&self, skip_cache: bool) -> Result<RunnersGroupResponse> {
+        let endpoint = self.endpoint(&self.0.api_base, "runner-groups")?;
+        let key = endpoint.as_str().to_string();
+        if !skip_cache {
+            if let Some(result) = self.0.runner_groups.lock().unwrap().get(&key) {
+                debug!("Cache hit: {}", endpoint);
+                return Ok(result.clone());
+            }
+        }
+        debug!("GET {}", endpoint);
+        let response = self.0.client.get(endpoint).send().await?.json::<RunnersGroupResponse>().await?;
+        let response_clone = response.clone();
+        self.0.runner_groups.lock().unwrap().insert(key.to_string(), response);
+        Ok(response_clone)
     }
 
-    pub async fn get_all(&self) -> Result<RunnersGroupResponse> {
-        let endpoint = self.endpoint("runner-groups")?;
+    pub async fn get_runners(&self, group_id: usize, skip_cache: bool) -> Result<RunnersResponse> {
+        let endpoint = self.endpoint(&self.0.api_base, &format!("runner-groups/{}/runners", group_id))?;
+        let key = endpoint.as_str().to_string();
+        if !skip_cache {
+            if let Some(result) = self.0.runners.lock().unwrap().get(&key) {
+                debug!("Cache hit: {}", endpoint);
+                return Ok(result.clone())
+            }
+        }
         debug!("GET {}", endpoint);
-        Ok(self.0.client.get(endpoint).send().await?.json::<RunnersGroupResponse>().await?)
-    }
-
-    pub async fn get_runners(&self, group_id: usize) -> Result<RunnersResponse> {
-        let endpoint = self.endpoint(&format!("runner-groups/{}/runners", group_id))?;
-        debug!("GET {}", endpoint);
-        Ok(self.0.client.get(endpoint).send().await?.json::<RunnersResponse>().await?)
+        let response = self.0.client.get(endpoint).send().await?.json::<RunnersResponse>().await?;
+        let response_clone = response.clone();
+        self.0.runners.lock().unwrap().insert(key.to_string(), response);
+        Ok(response_clone)
     }
 
     pub async fn create_runner_group(&self, runner_group: ApiRunnerGroupCreate) -> Result<ApiRunnerGroup> {
-        let endpoint = self.endpoint("runner-groups")?;
+        let endpoint = self.endpoint(&self.0.api_base, "runner-groups")?;
         debug!("POST {} : {:?}", endpoint, runner_group);
         Ok(self.0.client.post(endpoint).json(&runner_group).send().await?.json::<ApiRunnerGroup>().await?)
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct APILabel {
     pub id: usize,
     pub name: String,
     #[serde(rename = "type")]
     pub label_type: String,
 }
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct ApiRunner {
     pub id: usize,
     pub name: String,
@@ -123,7 +166,7 @@ pub struct ApiRunner {
     pub group_id: usize,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct RunnersResponse{
     pub total_count: usize,
     pub runners: Vec<ApiRunner>
