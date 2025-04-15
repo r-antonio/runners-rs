@@ -34,6 +34,10 @@ impl Client {
     pub fn runner_groups(&self) -> RunnersGroupsEndpoint {
         RunnersGroupsEndpoint(self)
     }
+
+    pub fn repos(&self) -> RepoEndpoint {
+        RepoEndpoint(self)
+    }
 }
 
 trait CustomEndpoint {
@@ -47,22 +51,45 @@ pub struct LabelsBody {
     labels: Vec<String>
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RepoResponse {
+    pub id: usize,
+    pub name: String,
+}
+pub struct RepoEndpoint<'c>(&'c Client);
+impl CustomEndpoint for RepoEndpoint<'_> {}
+
+impl <'c> RepoEndpoint<'c> {
+    pub async fn get_repo(&self, org: &str, repo: &str) -> Result<RepoResponse>{
+        let endpoint = self.0.api_base.join(&format!("/repos/{}/{}", org, repo))?;
+        debug!("GET {}", endpoint);
+        Ok(self.0.client.get(endpoint).send().await?.json::<RepoResponse>().await?)
+    }
+}
+
 pub struct RunnersEndpoint<'c>(&'c Client);
 
 impl CustomEndpoint for RunnersEndpoint<'_> {}
 
 impl<'c> RunnersEndpoint<'c> {
     pub async fn get_all(&self) -> Result<RunnersResponse> {
-        let endpoint = self.endpoint(&self.0.api_base, "runners")?;
+        let endpoint = self.endpoint(&self.0.api_base, "actions/runners")?;
         debug!("GET {}", endpoint);
         Ok(self.0.client.get(endpoint).send().await?.json::<RunnersResponse>().await?)
     }
 
     pub async fn add_label(&self, id: usize, labels: Vec<String>) -> Result<()> {
-        let endpoint = self.endpoint(&self.0.api_base, &format!("runners/{}/labels", id))?;
+        let endpoint = self.endpoint(&self.0.api_base, &format!("actions/runners/{}/labels", id))?;
         debug!("POST {}", endpoint);
         let body = LabelsBody { labels };
         self.0.client.post(endpoint).json(&body).send().await?.error_for_status()?;
+        Ok(())
+    }
+
+    pub async fn remove_label(&self, id: usize, label: String) -> Result<()> {
+        let endpoint = self.endpoint(&self.0.api_base, &format!("actions/runners/{}/labels/{}", id, label))?;
+        debug!("DELETE {}", endpoint);
+        self.0.client.delete(endpoint).send().await?.error_for_status()?;
         Ok(())
     }
 }
@@ -98,17 +125,17 @@ pub struct ApiRunnerGroup {
 
 #[derive(Debug, Serialize)]
 pub struct ApiRunnerGroupCreate {
-    name: String,
-    visibility: RunnerGroupVisibility,
-    selected_repository_ids: Vec<usize>,
-    runners: Vec<usize>,
+    pub name: String,
+    pub visibility: RunnerGroupVisibility,
+    pub selected_repository_ids: Vec<usize>,
+    pub runners: Vec<usize>,
 }
 
 pub struct RunnersGroupsEndpoint<'c>(&'c Client);
 impl CustomEndpoint for RunnersGroupsEndpoint<'_> {}
 impl<'c> RunnersGroupsEndpoint<'c> {
     pub async fn get_all(&self, skip_cache: bool) -> Result<RunnersGroupResponse> {
-        let endpoint = self.endpoint(&self.0.api_base, "runner-groups")?;
+        let endpoint = self.endpoint(&self.0.api_base, "actions/runner-groups")?;
         let key = endpoint.as_str().to_string();
         if !skip_cache {
             if let Some(result) = self.0.runner_groups.lock().unwrap().get(&key) {
@@ -124,7 +151,7 @@ impl<'c> RunnersGroupsEndpoint<'c> {
     }
 
     pub async fn get_runners(&self, group_id: usize, skip_cache: bool) -> Result<RunnersResponse> {
-        let endpoint = self.endpoint(&self.0.api_base, &format!("runner-groups/{}/runners", group_id))?;
+        let endpoint = self.endpoint(&self.0.api_base, &format!("actions/runner-groups/{}/runners", group_id))?;
         let key = endpoint.as_str().to_string();
         if !skip_cache {
             if let Some(result) = self.0.runners.lock().unwrap().get(&key) {
@@ -140,10 +167,25 @@ impl<'c> RunnersGroupsEndpoint<'c> {
     }
 
     pub async fn create_runner_group(&self, runner_group: ApiRunnerGroupCreate) -> Result<ApiRunnerGroup> {
-        let endpoint = self.endpoint(&self.0.api_base, "runner-groups")?;
+        let endpoint = self.endpoint(&self.0.api_base, "actions/runner-groups")?;
         debug!("POST {} : {:?}", endpoint, runner_group);
         Ok(self.0.client.post(endpoint).json(&runner_group).send().await?.json::<ApiRunnerGroup>().await?)
     }
+
+    pub async fn add_runner_to_group(&self, runner_group_id: usize, runner_id: usize) -> Result<()>{
+        let endpoint = self.endpoint(&self.0.api_base, &format!("actions/runner-groups/{}/runners/{}", runner_group_id, runner_id))?;
+        debug!("PUT {}", endpoint);
+        self.0.client.put(endpoint).send().await?.error_for_status()?;
+        Ok(())
+    }
+
+    pub async fn add_repo_access(&self, runner_group_id: usize, repo_id: usize) -> Result<()> {
+        let endpoint = self.endpoint(&self.0.api_base, &format!("actions/runner-groups/{}/repositories/{}", runner_group_id, repo_id))?;
+        debug!("PUT {}", endpoint);
+        self.0.client.put(endpoint).send().await?.error_for_status()?;
+        Ok(())
+    }
+
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

@@ -34,7 +34,8 @@ use color_eyre::owo_colors::OwoColorize;
 use crossterm::event::KeyModifiers;
 use ratatui::widgets::{BorderType, Tabs};
 use tokio::sync::mpsc;
-use crate::ui::{Operation, Popup, UIList};
+use crate::api::{ApiRunnerGroupCreate, RunnerGroupVisibility};
+use crate::ui::{RunnerOperation, Popup, UIList, GroupOperation};
 
 const TODO_HEADER_STYLE: Style = Style::new().fg(SLATE.c100).bg(BLUE.c800);
 const NORMAL_ROW_BG: Color = SLATE.c950;
@@ -62,14 +63,17 @@ impl RunnerList {
 struct AppState<'a> {
     runner_groups: UIList<RunnerGroup>,
     runners: UIList<Runner>,
-    runner_ops: UIList<Operation>,
+    runner_ops: UIList<RunnerOperation>,
+    group_ops: UIList<GroupOperation>,
     selected_tab: Tab,
     selected_runner: Option<usize>,
+    selected_group: Option<usize>,
     selected_label: ListState,
     show_runner_labels: bool,
     input_buffer: String,
     should_exit: bool,
     show_popup: bool,
+    loading: bool,
     tx: &'a mpsc::UnboundedSender<BackendMessage>,
     api_rx: mpsc::UnboundedReceiver<ApiMessage>,
 }
@@ -109,18 +113,7 @@ impl <'a> Widget for &mut AppState<'a> {
                     .highlight_symbol(">")
                     .highlight_spacing(HighlightSpacing::Always);
                 StatefulWidget::render(list, main_area, buf, &mut self.runner_ops.state);
-                if self.show_popup {
-                    let popup_area = Rect {
-                        x: main_area.width / 4,
-                        y: main_area.height / 3,
-                        width: main_area.width / 2,
-                        height: 3,
-                    };
-                    Popup::default()
-                        .title("Input new label")
-                        .content(format!("{}_", self.input_buffer.as_str()))
-                        .render(popup_area, buf);
-                }
+                self.show_popup(main_area, buf);
             },
             Tab::RemoveLabels => {
                 let idx = self.selected_runner.unwrap();
@@ -143,6 +136,7 @@ impl <'a> Widget for &mut AppState<'a> {
                     .highlight_symbol(">")
                     .highlight_spacing(HighlightSpacing::Always);
                 StatefulWidget::render(list, main_area, buf, &mut self.selected_label);
+                self.show_popup(main_area, buf);
             },
             Tab::RunnerGroups => {
                 let list_title = format!("Runner Groups");
@@ -164,6 +158,28 @@ impl <'a> Widget for &mut AppState<'a> {
                     .highlight_spacing(HighlightSpacing::Always);
                 StatefulWidget::render(list, main_area, buf, &mut self.runner_groups.state);
             }
+            Tab::GroupOpSelection => {
+                let idx = self.selected_group.unwrap();
+                let list_title = format!("Select operation - {}", self.runner_groups.items[idx].name);
+                let block = Block::new()
+                    .title(Line::raw(list_title).centered())
+                    .borders(Borders::TOP)
+                    .border_set(symbols::border::EMPTY)
+                    .border_style(self.selected_tab.style())
+                    .bg(NORMAL_ROW_BG);
+
+                let items: Vec<ListItem> = self.group_ops.items
+                    .iter()
+                    .map(|op|ListItem::from(op.deref()))
+                    .collect();
+                let list = List::new(items)
+                    .block(block)
+                    .highlight_style(SELECTED_STYLE)
+                    .highlight_symbol(">")
+                    .highlight_spacing(HighlightSpacing::Always);
+                StatefulWidget::render(list, main_area, buf, &mut self.group_ops.state);
+                self.show_popup(main_area, buf);
+            }
         }
 
     }
@@ -171,22 +187,49 @@ impl <'a> Widget for &mut AppState<'a> {
 
 impl <'a> AppState<'a> {
     fn new(runners: Vec<Runner>, runner_groups: Vec<RunnerGroup>, selected_tab: Tab, tx: &'a mpsc::UnboundedSender<BackendMessage>, api_rx: mpsc::UnboundedReceiver<ApiMessage>) -> Self {
-        let runner_operations = Operation::all();
+        let runner_operations = RunnerOperation::all();
+        let group_operations = GroupOperation::all();
         let mut state = AppState {
             runners: UIList::new(runners, Tab::Runners.style()).with_first_selected(),
             runner_ops: UIList::new(runner_operations, Tab::RunnerOpSelection.style()).with_first_selected(),
             runner_groups: UIList::new(runner_groups, Tab::RunnerGroups.style()).with_first_selected(),
+            group_ops: UIList::new(group_operations, Tab::GroupOpSelection.style()).with_first_selected(),
             selected_tab,
             selected_runner: None,
+            selected_group: None,
             selected_label: ListState::default(),
             input_buffer: String::new(),
             should_exit: false,
             show_runner_labels: false,
             show_popup: false,
+            loading: false,
             tx,
             api_rx
         };
         state
+    }
+
+    fn show_popup(&self, area: Rect, buf: &mut Buffer) {
+        if self.show_popup || self.loading {
+            let popup_area = Rect {
+                x: area.width / 4,
+                y: area.height / 3,
+                width: area.width / 2,
+                height: 3,
+            };
+
+            if self.show_popup {
+                Popup::default()
+                    .title("Input new label")
+                    .content(format!("{}_", self.input_buffer.as_str()))
+                    .render(popup_area, buf);
+            } else if self.loading {
+                Popup::default()
+                    .title("Loading")
+                    .content(format!("Loading ..."))
+                    .render(popup_area, buf);
+            }
+        }
     }
 
     fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
@@ -199,6 +242,7 @@ impl <'a> AppState<'a> {
             }
             if let Ok(message) = self.api_rx.try_recv() {
                 match message {
+                    ApiMessage::Ok => self.toggle_loading(),
                     ApiMessage::RunnerList(runners) => self.set_runners(runners),
                     ApiMessage::RunnerGroupList(groups) => self.set_runner_groups(groups),
                 }
@@ -233,7 +277,7 @@ impl <'a> AppState<'a> {
                 KeyCode::Up => self.runners.select_previous(),
                 KeyCode::Home => self.runners.select_first(),
                 KeyCode::End => self.runners.select_last(),
-                KeyCode::Right | KeyCode::Enter => self.toggle_status(),
+                KeyCode::Right | KeyCode::Enter => self.advance_with_selected_runner(),
                 KeyCode::Backspace => self.remove_last_input(),
                 KeyCode::Char(c) => self.update_filter(c),
                 _ => {}
@@ -244,28 +288,26 @@ impl <'a> AppState<'a> {
                     KeyCode::Down => self.runner_ops.select_next(),
                     KeyCode::Left => self.selected_tab = Tab::Runners,
                     KeyCode::Right | KeyCode::Enter => match self.runner_ops.selected() {
-                        Some(Operation::AddLabel) => {
+                        Some(RunnerOperation::AddLabel) => {
                             if !self.show_popup {
                                 self.show_input_popup()
                             } else {
                                 self.run_input_op()
                             }
                         },
-                        Some(Operation::RemoveLabel) => {
+                        Some(RunnerOperation::RemoveLabel) => {
                             self.selected_tab = Tab::RemoveLabels
                         },
-                        other => { debug!("Selected operation: {:?}", other) }
+                        Some(RunnerOperation::ChangeGroup) => {
+                            self.selected_tab = Tab::RunnerGroups
+                        }
+                        _ => {}
                     },
                     KeyCode::Char(c) => self.add_to_input(c),
                     KeyCode::Backspace => self.remove_last_input(),
                     _ => {}
                 }
             }
-            Tab::RunnerGroups => {
-                match key.code {
-                    _ => {}
-                }
-            },
             Tab::RemoveLabels => {
                 match key.code {
                     KeyCode::Up => self.selected_label.select_previous(),
@@ -275,8 +317,42 @@ impl <'a> AppState<'a> {
                     _ => {}
                 }
             }
+            Tab::RunnerGroups => {
+                match key.code {
+                    KeyCode::Up => self.runner_groups.select_previous(),
+                    KeyCode::Down => self.runner_groups.select_next(),
+                    KeyCode::Right | KeyCode::Enter => self.advance_with_selected_group(),
+                    _ => {}
+                }
+            }
+            Tab::GroupOpSelection => {
+                match key.code {
+                    KeyCode::Up => self.group_ops.select_previous(),
+                    KeyCode::Down => self.group_ops.select_next(),
+                    KeyCode::Left => self.selected_tab = Tab::RunnerGroups,
+                    KeyCode::Right | KeyCode::Enter => match self.group_ops.selected() {
+                        Some(GroupOperation::AddRepo) => self.show_popup_or_execute(),
+                        Some(GroupOperation::CreateGroup) => {
+                            debug!("This should be anywhere else");
+                            self.show_popup_or_execute();
+                        }
+                        _ => {}
+                    },
+                    KeyCode::Char(c) => self.add_to_input(c),
+                    KeyCode::Backspace => self.remove_last_input(),
+                    _ => {}
+                }
+            }
         }
 
+    }
+
+    fn show_popup_or_execute(&mut self) {
+        if !self.show_popup {
+            self.show_input_popup();
+        } else {
+            self.run_input_op();
+        }
     }
 
     fn render_header(&self, area: Rect, buf: &mut Buffer) {
@@ -285,8 +361,7 @@ impl <'a> AppState<'a> {
             .into_iter()
             .enumerate()
             .find(|(i, tab)| self.selected_tab == *tab)
-            .map(|(i, _)| i)
-            .unwrap_or(0);
+            .map(|(i, _)| i);
         Tabs::new(titles)
             .select(selected_idx)
             .padding("", "")
@@ -346,14 +421,41 @@ impl <'a> AppState<'a> {
 
     fn run_input_op(&mut self) {
         self.show_popup = false;
+        self.loading = true;
         let input = std::mem::replace(&mut self.input_buffer, String::new());
-        let idx = self.selected_runner.unwrap();
-        let runner = self.runners.filtered_items[idx].upgrade().unwrap().id;
-        self.tx.send(BackendMessage::AddLabel(runner, input))
-            .expect("Could not send add label command to backend");
+        match self.selected_tab {
+            Tab::RunnerOpSelection => {
+                let idx = self.selected_runner.unwrap();
+                let runner = self.runners.filtered_items[idx].upgrade().unwrap().id;
+                self.tx.send(BackendMessage::AddLabel(runner, input))
+                    .expect("Could not send add label command to backend");
+            }
+            Tab::GroupOpSelection => {
+                let op = self.group_ops.selected().unwrap();
+                match op {
+                    GroupOperation::AddRepo => {
+                        let idx = self.selected_group.unwrap();
+                        self.tx.send(BackendMessage::AddRepoToGroup(input, idx))
+                            .expect("Could not send add repo command to backend");
+                    }
+                    GroupOperation::CreateGroup => {
+                        let group = ApiRunnerGroupCreate {
+                            name: input,
+                            visibility: RunnerGroupVisibility::Selected,
+                            runners: vec![],
+                            selected_repository_ids: vec![],
+                        };
+                        self.tx.send(BackendMessage::CreateRunnerGroup(group))
+                            .expect("Could not send create runner command to backend");
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn remove_label(&mut self) {
+        self.loading = true;
         let idx = self.selected_runner.unwrap();
         let selected_label = self.selected_label.selected().unwrap();
         let runner = self.runners.filtered_items[idx].upgrade().unwrap();
@@ -363,10 +465,17 @@ impl <'a> AppState<'a> {
     }
 
     /// Changes the status of the selected list item
-    fn toggle_status(&mut self) {
+    fn advance_with_selected_runner(&mut self) {
         if let Some(_) = self.runners.state.selected() {
             self.selected_runner = self.runners.state.selected();
             self.selected_tab = Tab::RunnerOpSelection;
+        }
+    }
+
+    fn advance_with_selected_group(&mut self) {
+        if let Some(_) = self.runner_groups.selected() {
+            self.selected_group = self.runner_groups.state.selected();
+            self.selected_tab = Tab::GroupOpSelection;
         }
     }
 
@@ -379,7 +488,14 @@ impl <'a> AppState<'a> {
         self.filter_items();
     }
 
+    fn toggle_loading(&mut self) {
+        if self.loading {
+            self.loading = false;
+        }
+    }
+
     fn set_runners(&mut self, runners: Vec<Runner>) {
+        self.toggle_loading();
         self.runners.items = runners.into_iter().map(|r| Rc::new(r)).collect();
         self.filter_items();
         self.selected_tab = Tab::Runners;
@@ -408,6 +524,7 @@ enum Tab {
     RunnerGroups,
     RunnerOpSelection,
     RemoveLabels,
+    GroupOpSelection,
 }
 
 impl Tab {
@@ -424,6 +541,7 @@ impl Tab {
             Tab::RunnerGroups => " Runner Groups ",
             Tab::RunnerOpSelection => " RunnerOpSelection ",
             Tab::RemoveLabels => " Remove Labels ",
+            Tab::GroupOpSelection => " GroupOpSelection ",
         }
     }
 
@@ -433,6 +551,7 @@ impl Tab {
             Tab::RunnerGroups => TODO_HEADER_STYLE.bg(Color::Green),
             Tab::RunnerOpSelection => TODO_HEADER_STYLE.bg(Color::Red),
             Tab::RemoveLabels => TODO_HEADER_STYLE.bg(Color::DarkGray),
+            Tab::GroupOpSelection => TODO_HEADER_STYLE.bg(Color::LightRed),
         }
     }
 }
@@ -444,7 +563,7 @@ async fn main() -> Result<()> {
         .expect("Could not read config file");
     let (tx, rx) = mpsc::unbounded_channel();
     let (api_tx, api_rx) = mpsc::unbounded_channel();
-    let mut worker = Worker::new(rx, api_tx, &config);
+    let mut worker = Worker::new(rx, api_tx, config);
     color_eyre::install()?;
     let terminal = ratatui::init();
 

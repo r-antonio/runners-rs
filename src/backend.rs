@@ -1,4 +1,4 @@
-use crate::api::Client;
+use crate::api::{ApiRunnerGroupCreate, Client, RunnerGroupVisibility};
 use crate::config::Config;
 use crate::runners::{Runner, RunnerGroup};
 use cli_log::debug;
@@ -12,29 +12,33 @@ pub enum BackendMessage {
     AddLabel(usize, String),
     DeleteLabel(usize, String),
     ChangeGroup(usize, usize),
-    AddRepoToGroup(usize, usize),
+    AddRepoToGroup(String, usize),
+    CreateRunnerGroup(ApiRunnerGroupCreate),
+    AddRunnerToGroup(usize, usize),
 }
 
 pub enum ApiMessage {
+    Ok,
     RunnerList(Vec<Runner>),
     RunnerGroupList(Vec<RunnerGroup>),
 }
 
 pub struct Worker {
     pub client: Arc<Client>,
+    pub config: Config,
     pub rx: mpsc::UnboundedReceiver<BackendMessage>,
     pub tx: mpsc::UnboundedSender<ApiMessage>,
 }
 
 impl Worker {
-    pub fn new(rx: mpsc::UnboundedReceiver<BackendMessage>, tx: mpsc::UnboundedSender<ApiMessage>, config: &Config) -> Self {
+    pub fn new(rx: mpsc::UnboundedReceiver<BackendMessage>, tx: mpsc::UnboundedSender<ApiMessage>, config: Config) -> Self {
         let mut headers = HeaderMap::new();
         headers.insert("User-Agent", HeaderValue::from_str("curl").unwrap());
         headers.insert("Authorization", HeaderValue::from_str(&format!("Bearer {}", config.token)).unwrap());
-        let github_client = Client::new(&format!("https://api.github.com/orgs/{}/actions/", config.organization), headers)
+        let github_client = Client::new(&format!("https://api.github.com/orgs/{}/", config.organization), headers)
             .expect("Failed to create github client");
         let client = Arc::new(github_client);
-        Worker { client, rx, tx }
+        Worker { client, rx, tx, config }
     }
 
     pub async fn get_runner_groups(&mut self) -> Vec<RunnerGroup> {
@@ -103,13 +107,32 @@ impl Worker {
                     }
                     BackendMessage::DeleteLabel(runner_id, label) => {
                         debug!("Removing label: {} for runner {}", label, runner_id);
+                        self.client.runners().remove_label(runner_id, label).await
+                            .expect("Could not remove label");
+                        self.refresh_runners().await;
                     }
                     BackendMessage::ChangeGroup(runner_id, group_id) => {
-                        todo!()
+                        debug!("Changing group of runner {} to group {}", runner_id, group_id);
+                        self.client.runner_groups().add_runner_to_group(runner_id, group_id).await
+                            .expect("Could not add runner to group");
+                        self.refresh_runners().await;
                     }
-                    BackendMessage::AddRepoToGroup(repo_id, group_id) => {
-                        todo!()
+                    BackendMessage::AddRepoToGroup(repo_name, group_id) => {
+                        debug!("Adding repo {} to group id {}", repo_name, group_id);
+                        let repo = self.client.repos().get_repo(&self.config.organization, &repo_name).await
+                            .expect("Could not get repo");
+                        self.client.runner_groups().add_repo_access(group_id, repo.id).await
+                            .expect("Could not add repo to group");
+                        self.tx.send(ApiMessage::Ok)
+                            .expect("Could not send response to frontend");
                     }
+                    BackendMessage::CreateRunnerGroup(runner_group) => {
+                        debug!("Creating runner group {:?}", runner_group);
+                        self.client.runner_groups().create_runner_group(runner_group).await
+                            .expect("Could not create runner group");
+                        self.refresh_runners().await;
+                    }
+                    _ => {}
                 }
             }
         }

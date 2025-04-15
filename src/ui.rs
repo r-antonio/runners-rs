@@ -87,34 +87,62 @@ impl <T> UIList<T> {
     // }
 }
 
-#[derive(Debug)]
-pub enum Operation {
+pub enum RunnerOperation {
     AddLabel,
     RemoveLabel,
     ChangeGroup,
 }
 
-impl Operation {
-    pub fn all() -> Vec<Operation> {
-        vec![Operation::AddLabel, Operation::RemoveLabel, Operation::ChangeGroup]
+impl RunnerOperation {
+    pub fn all() -> Vec<RunnerOperation> {
+        vec![RunnerOperation::AddLabel, RunnerOperation::RemoveLabel, RunnerOperation::ChangeGroup]
     }
     fn as_str(&self) -> &'static str {
         match self {
-            Operation::AddLabel => "Add label",
-            Operation::RemoveLabel => "Remove label",
-            Operation::ChangeGroup => "Change group",
+            RunnerOperation::AddLabel => "Add label",
+            RunnerOperation::RemoveLabel => "Remove label",
+            RunnerOperation::ChangeGroup => "Change group",
         }
     }
 }
 
-impl ToLine for Operation {
+impl ToLine for RunnerOperation {
     fn to_line(&self) -> Line {
         Line::styled(format!(" {}", &self.as_str()), TEXT_FG_COLOR)
     }
 }
 
-impl From<&Operation> for ListItem<'_> {
-    fn from(op: &Operation) -> Self {
+impl From<&RunnerOperation> for ListItem<'_> {
+    fn from(op: &RunnerOperation) -> Self {
+        ListItem::new(format!("{} ", op.as_str()))
+    }
+}
+
+pub enum GroupOperation {
+    AddRepo,
+    CreateGroup,
+}
+
+impl GroupOperation {
+    pub fn all() -> Vec<GroupOperation> {
+        vec![GroupOperation::CreateGroup, GroupOperation::AddRepo]
+    }
+    fn as_str(&self) -> &'static str {
+        match self {
+            GroupOperation::AddRepo => "Add repo",
+            GroupOperation::CreateGroup => "Create group",
+        }
+    }
+}
+
+impl ToLine for GroupOperation {
+    fn to_line(&self) -> Line {
+        Line::styled(format!(" {}", &self.as_str()), TEXT_FG_COLOR)
+    }
+}
+
+impl From<&GroupOperation> for ListItem<'_> {
+    fn from(op: &GroupOperation) -> Self {
         ListItem::new(format!("{} ", op.as_str()))
     }
 }

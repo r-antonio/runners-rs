@@ -49,7 +49,7 @@ impl From<ApiRunner> for Runner {
             runner.id,
             status,
             runner.name,
-            runner.labels.iter().map(|x| x.name.to_string()).collect(),
+            runner.labels.iter().filter(|label| label.label_type == "custom").map(|x| x.name.to_string()).collect(),
             None
         )
     }
