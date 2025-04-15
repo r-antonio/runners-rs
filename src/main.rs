@@ -434,8 +434,8 @@ impl <'a> AppState<'a> {
                 let op = self.group_ops.selected().unwrap();
                 match op {
                     GroupOperation::AddRepo => {
-                        let idx = self.selected_group.unwrap();
-                        self.tx.send(BackendMessage::AddRepoToGroup(input, idx))
+                        let group = self.runner_groups.selected().unwrap();
+                        self.tx.send(BackendMessage::AddRepoToGroup(input, group.id))
                             .expect("Could not send add repo command to backend");
                     }
                     GroupOperation::CreateGroup => {
