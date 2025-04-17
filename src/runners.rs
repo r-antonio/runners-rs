@@ -1,11 +1,8 @@
+use std::fmt::Display;
 use ratatui::prelude::Line;
 use ratatui::widgets::ListItem;
 use crate::api::{ApiRunner, ApiRunnerGroup, RunnerGroupVisibility};
 use crate::{COMPLETED_TEXT_FG_COLOR, TEXT_FG_COLOR};
-
-pub trait ToLine {
-    fn to_line(&self) -> Line;
-}
 
 #[derive(Debug, Clone)]
 pub enum RunnerStatus {
@@ -23,18 +20,9 @@ pub struct Runner {
     pub group: Option<String>,
 }
 
-impl ToLine for Runner {
-    fn to_line(&self) -> Line {
-        let group_name = if let Some(group) = &self.group { group } else { &"default".to_string()};
-        let labels = self.labels.join(" | ");
-        let text = format!("{} ({}) | {}", &self.name, &group_name, &labels);
-        match self.status {
-            RunnerStatus::Online => Line::styled(format!(" ✓ {}", &text), TEXT_FG_COLOR),
-            RunnerStatus::Offline => {
-                Line::styled(format!(" x {}", &text), COMPLETED_TEXT_FG_COLOR)
-            }
-            RunnerStatus::Busy => Line::styled(format!(" ☐ {}", &text), TEXT_FG_COLOR)
-        }
+impl Display for Runner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} - {} - {}", self.name.to_string(), self.id, self.labels.join("|"))
     }
 }
 
@@ -89,18 +77,17 @@ pub struct RunnerGroup {
     pub visibility: RunnerGroupVisibility,
 }
 
+impl Display for RunnerGroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name.to_string())
+    }
+}
+
 impl RunnerGroup {
     fn new(id: usize, name: String, visibility: RunnerGroupVisibility) -> Self {
         RunnerGroup {
             id, name, visibility
         }
-    }
-}
-
-impl ToLine for RunnerGroup {
-    fn to_line(&self) -> Line {
-        let text = format!("{} ID: {}", &self.name, &self.id);
-        Line::styled(format!(" {}", &text), TEXT_FG_COLOR)
     }
 }
 

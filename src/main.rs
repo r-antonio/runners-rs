@@ -61,6 +61,8 @@ impl RunnerList {
 }
 
 struct AppState<'a> {
+    runner_groups_: Vec<Rc<RunnerGroup>>,
+    runners_: Vec<Rc<Runner>>,
     runner_groups: UIList<RunnerGroup>,
     runners: UIList<Runner>,
     runner_ops: UIList<RunnerOperation>,
@@ -90,94 +92,37 @@ impl <'a> Widget for &mut AppState<'a> {
         AppState::render_footer(footer_area, buf);
         match self.selected_tab {
             Tab::Runners => {
-                self.render_list(main_area, buf);
+                let mut list_title = String::from("Runners - ");
+                list_title.push_str(self.runners.input_buffer.as_str());
+                self.runners.render(main_area, buf, &list_title);
             },
             Tab::RunnerOpSelection => {
                 let idx = self.selected_runner.unwrap();
                 let list_title = format!("Select operation - {}", self.runners.items[idx].name);
-                let block = Block::new()
-                    .title(Line::raw(list_title).centered())
-                    .borders(Borders::TOP)
-                    .border_set(symbols::border::EMPTY)
-                    .border_style(self.selected_tab.style())
-                    //.border_style(TODO_HEADER_STYLE)
-                    .bg(NORMAL_ROW_BG);
-
-                let items: Vec<ListItem> = self.runner_ops.items
-                    .iter()
-                    .map(|op|ListItem::from(op.deref()))
-                    .collect();
-                let list = List::new(items)
-                    .block(block)
-                    .highlight_style(SELECTED_STYLE)
-                    .highlight_symbol(">")
-                    .highlight_spacing(HighlightSpacing::Always);
-                StatefulWidget::render(list, main_area, buf, &mut self.runner_ops.state);
+                self.runner_ops.render(main_area, buf, &list_title);
                 self.show_popup(main_area, buf);
             },
             Tab::RemoveLabels => {
                 let idx = self.selected_runner.unwrap();
                 let runner = &self.runners.items[idx];
                 let list_title = format!("Remove labels - {}", runner.name);
-                let block = Block::new()
-                    .title(Line::raw(list_title).centered())
-                    .borders(Borders::TOP)
-                    .border_set(symbols::border::EMPTY)
-                    .border_style(self.selected_tab.style())
-                    .bg(NORMAL_ROW_BG);
+                let block = title_block(&list_title, self.selected_tab.style());
 
                 let items: Vec<ListItem> = runner.labels
                     .iter()
                     .map(|label|ListItem::from(label.deref()))
                     .collect();
-                let list = List::new(items)
-                    .block(block)
-                    .highlight_style(SELECTED_STYLE)
-                    .highlight_symbol(">")
-                    .highlight_spacing(HighlightSpacing::Always);
-                StatefulWidget::render(list, main_area, buf, &mut self.selected_label);
+                render_list(main_area, buf, block, items, &mut self.selected_label);
                 self.show_popup(main_area, buf);
             },
             Tab::RunnerGroups => {
                 let list_title = format!("Runner Groups");
-                let block = Block::new()
-                    .title(Line::raw(list_title).centered())
-                    .borders(Borders::TOP)
-                    .border_set(symbols::border::EMPTY)
-                    .border_style(self.selected_tab.style())
-                    .bg(NORMAL_ROW_BG);
-
-                let items: Vec<ListItem> = self.runner_groups.items
-                    .iter()
-                    .map(|op|ListItem::from(op.deref()))
-                    .collect();
-                let list = List::new(items)
-                    .block(block)
-                    .highlight_style(SELECTED_STYLE)
-                    .highlight_symbol(">")
-                    .highlight_spacing(HighlightSpacing::Always);
-                StatefulWidget::render(list, main_area, buf, &mut self.runner_groups.state);
+                self.runner_groups.render(main_area, buf, &list_title);
             }
             Tab::GroupOpSelection => {
                 let idx = self.selected_group.unwrap();
                 let list_title = format!("Select operation - {}", self.runner_groups.items[idx].name);
-                let block = Block::new()
-                    .title(Line::raw(list_title).centered())
-                    .borders(Borders::TOP)
-                    .border_set(symbols::border::EMPTY)
-                    .border_style(self.selected_tab.style())
-                    .bg(NORMAL_ROW_BG);
-
-                let items: Vec<ListItem> = self.group_ops.items
-                    .iter()
-                    .map(|op|ListItem::from(op.deref()))
-                    .collect();
-                let list = List::new(items)
-                    .block(block)
-                    .highlight_style(SELECTED_STYLE)
-                    .highlight_symbol(">")
-                    .highlight_spacing(HighlightSpacing::Always);
-                StatefulWidget::render(list, main_area, buf, &mut self.group_ops.state);
+                self.group_ops.render(main_area, buf, &list_title);
                 self.show_popup(main_area, buf);
             }
         }
@@ -190,6 +135,8 @@ impl <'a> AppState<'a> {
         let runner_operations = RunnerOperation::all();
         let group_operations = GroupOperation::all();
         let mut state = AppState {
+            runners_: vec![],
+            runner_groups_: vec![],
             runners: UIList::new(runners, Tab::Runners.style()).with_first_selected(),
             runner_ops: UIList::new(runner_operations, Tab::RunnerOpSelection.style()).with_first_selected(),
             runner_groups: UIList::new(runner_groups, Tab::RunnerGroups.style()).with_first_selected(),
@@ -243,8 +190,8 @@ impl <'a> AppState<'a> {
             if let Ok(message) = self.api_rx.try_recv() {
                 match message {
                     ApiMessage::Ok => self.toggle_loading(),
-                    ApiMessage::RunnerList(runners) => self.set_runners(runners),
-                    ApiMessage::RunnerGroupList(groups) => self.set_runner_groups(groups),
+                    ApiMessage::RunnerList(runners) => self.set_runners(*runners),
+                    ApiMessage::RunnerGroupList(groups) => self.set_runner_groups(*groups),
                 }
             }
         }
@@ -278,8 +225,8 @@ impl <'a> AppState<'a> {
                 KeyCode::Home => self.runners.select_first(),
                 KeyCode::End => self.runners.select_last(),
                 KeyCode::Right | KeyCode::Enter => self.advance_with_selected_runner(),
-                KeyCode::Backspace => self.remove_last_input(),
-                KeyCode::Char(c) => self.update_filter(c),
+                KeyCode::Backspace => self.runners.remove_last_input(),
+                KeyCode::Char(c) => self.runners.update_filter(c),
                 _ => {}
             },
             Tab::RunnerOpSelection => {
@@ -303,8 +250,8 @@ impl <'a> AppState<'a> {
                         }
                         _ => {}
                     },
-                    KeyCode::Char(c) => self.add_to_input(c),
-                    KeyCode::Backspace => self.remove_last_input(),
+                    KeyCode::Char(c) => self.runner_ops.update_filter(c),
+                    KeyCode::Backspace => self.runner_ops.remove_last_input(),
                     _ => {}
                 }
             }
@@ -338,8 +285,8 @@ impl <'a> AppState<'a> {
                         }
                         _ => {}
                     },
-                    KeyCode::Char(c) => self.add_to_input(c),
-                    KeyCode::Backspace => self.remove_last_input(),
+                    KeyCode::Char(c) => self.group_ops.update_filter(c),
+                    KeyCode::Backspace => self.group_ops.remove_last_input(),
                     _ => {}
                 }
             }
@@ -379,42 +326,6 @@ impl <'a> AppState<'a> {
             .render(area, buf);
     }
 
-    fn render_list(&mut self, area: Rect, buf: &mut Buffer) {
-        let mut list_title = String::from("Runners - ");
-        list_title.push_str(self.runners.input_buffer.as_str());
-        //self.runners.render(area, buf, &list_title);
-        let block = Block::new()
-            .title(Line::raw(list_title).centered())
-            .borders(Borders::TOP)
-            .border_set(symbols::border::EMPTY)
-            .border_style(self.selected_tab.style())
-            .bg(NORMAL_ROW_BG);
-
-        // Iterate through all elements in the `items` and stylize them.
-        let items: Vec<ListItem> = self
-            .runners
-            .filtered_items
-            .iter()
-            .enumerate()
-            .map(|(i, it)| {
-                let color = alternate_colors(i);
-                let item = it.upgrade().unwrap();
-                ListItem::from(item.deref()).bg(color)
-            })
-            .collect();
-
-        // Create a List from all list items and highlight the currently selected one
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(SELECTED_STYLE)
-            .highlight_symbol(">")
-            .highlight_spacing(HighlightSpacing::Always);
-
-        // We need to disambiguate this trait method as both `Widget` and `StatefulWidget` share the
-        // same method name `render`.
-        StatefulWidget::render(list, area, buf, &mut self.runners.state);
-    }
-
     fn show_input_popup(&mut self) {
         self.show_popup = true;
     }
@@ -426,7 +337,7 @@ impl <'a> AppState<'a> {
         match self.selected_tab {
             Tab::RunnerOpSelection => {
                 let idx = self.selected_runner.unwrap();
-                let runner = self.runners.filtered_items[idx].upgrade().unwrap().id;
+                let runner = self.runners.filtered_items[idx].id;
                 self.tx.send(BackendMessage::AddLabel(runner, input))
                     .expect("Could not send add label command to backend");
             }
@@ -445,7 +356,7 @@ impl <'a> AppState<'a> {
                             runners: vec![],
                             selected_repository_ids: vec![],
                         };
-                        self.tx.send(BackendMessage::CreateRunnerGroup(group))
+                        self.tx.send(BackendMessage::CreateRunnerGroup(Box::new(group)))
                             .expect("Could not send create runner command to backend");
                     }
                 }
@@ -458,13 +369,12 @@ impl <'a> AppState<'a> {
         self.loading = true;
         let idx = self.selected_runner.unwrap();
         let selected_label = self.selected_label.selected().unwrap();
-        let runner = self.runners.filtered_items[idx].upgrade().unwrap();
+        let runner = &self.runners.filtered_items[idx];
         let label = runner.labels[selected_label].clone();
         self.tx.send(BackendMessage::DeleteLabel(runner.id, label))
             .expect("Could not send delete label command to backend");
     }
 
-    /// Changes the status of the selected list item
     fn advance_with_selected_runner(&mut self) {
         if let Some(_) = self.runners.state.selected() {
             self.selected_runner = self.runners.state.selected();
@@ -479,15 +389,6 @@ impl <'a> AppState<'a> {
         }
     }
 
-    fn add_to_input(&mut self, c: char) {
-        self.input_buffer.write_char(c).unwrap();
-    }
-
-    fn remove_last_input(&mut self) {
-        self.input_buffer.pop();
-        self.filter_items();
-    }
-
     fn toggle_loading(&mut self) {
         if self.loading {
             self.loading = false;
@@ -497,24 +398,13 @@ impl <'a> AppState<'a> {
     fn set_runners(&mut self, runners: Vec<Runner>) {
         self.toggle_loading();
         self.runners.items = runners.into_iter().map(|r| Rc::new(r)).collect();
-        self.filter_items();
+        self.runners.filter_items();
         self.selected_tab = Tab::Runners;
     }
 
     fn set_runner_groups(&mut self, groups: Vec<RunnerGroup>) {
         self.runner_groups.items = groups.into_iter().map(|g| Rc::new(g)).collect();
-    }
-
-    fn update_filter(&mut self, c: char) {
-        self.add_to_input(c);
-        self.filter_items();
-    }
-
-    fn filter_items(&mut self) {
-        self.runners.filtered_items = self.runners.items.iter()
-            .filter(|r| r.name.contains(&self.input_buffer))
-            .map(|r| Rc::downgrade(r))
-            .collect()
+        self.runner_groups.filter_items();
     }
 }
 
@@ -583,6 +473,24 @@ async fn main() -> Result<()> {
     let app_result = app_state.run(terminal);
     ratatui::restore();
     app_result
+}
+
+fn render_list(area: Rect, buf: &mut Buffer, block: Block, items: Vec<ListItem<'_>>, state: &mut ListState) {
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(SELECTED_STYLE)
+        .highlight_symbol(">")
+        .highlight_spacing(HighlightSpacing::Always);
+    StatefulWidget::render(list, area, buf, state);
+}
+
+fn title_block(title: &str, style: Style) -> Block {
+    Block::new()
+        .title(Line::raw(title).centered())
+        .borders(Borders::TOP)
+        .border_set(symbols::border::EMPTY)
+        .border_style(style)
+        .bg(NORMAL_ROW_BG)
 }
 
 const fn alternate_colors(i: usize) -> Color {

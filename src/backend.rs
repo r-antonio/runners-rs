@@ -13,14 +13,14 @@ pub enum BackendMessage {
     DeleteLabel(usize, String),
     ChangeGroup(usize, usize),
     AddRepoToGroup(String, usize),
-    CreateRunnerGroup(ApiRunnerGroupCreate),
+    CreateRunnerGroup(Box<ApiRunnerGroupCreate>),
     AddRunnerToGroup(usize, usize),
 }
 
 pub enum ApiMessage {
     Ok,
-    RunnerList(Vec<Runner>),
-    RunnerGroupList(Vec<RunnerGroup>),
+    RunnerList(Box<Vec<Runner>>),
+    RunnerGroupList(Box<Vec<RunnerGroup>>),
 }
 
 pub struct Worker {
@@ -57,7 +57,7 @@ impl Worker {
             .into_iter()
             .map(|g|RunnerGroup::from(g))
             .collect();
-        self.tx.send(ApiMessage::RunnerGroupList(groups))
+        self.tx.send(ApiMessage::RunnerGroupList(Box::new(groups)))
             .expect("Could not sent command to frontend worker");
         let futures = group_ids
             .into_iter()
@@ -81,7 +81,7 @@ impl Worker {
 
     pub async fn refresh_runners(&mut self) {
         let runners = self.get_runners(Some(true)).await;
-        self.tx.send(ApiMessage::RunnerList(runners))
+        self.tx.send(ApiMessage::RunnerList(Box::new(runners)))
             .expect("Could not send refreshed runner list to frontend");
     }
 
@@ -90,12 +90,12 @@ impl Worker {
             match message {
                     BackendMessage::FetchGroups => {
                         let groups = self.get_runner_groups().await;
-                        self.tx.send(ApiMessage::RunnerGroupList(groups))
+                        self.tx.send(ApiMessage::RunnerGroupList(Box::new(groups)))
                             .expect("Could not sent command to frontend worker");
                     }
                     BackendMessage::FetchRunners => {
                         let runners = self.get_runners(None).await;
-                        self.tx.send(ApiMessage::RunnerList(runners))
+                        self.tx.send(ApiMessage::RunnerList(Box::new(runners)))
                             .expect("Could not send runner list to ui");
                     }
                     BackendMessage::AddLabel(runner_id, label) => {
@@ -128,7 +128,7 @@ impl Worker {
                     }
                     BackendMessage::CreateRunnerGroup(runner_group) => {
                         debug!("Creating runner group {:?}", runner_group);
-                        self.client.runner_groups().create_runner_group(runner_group).await
+                        self.client.runner_groups().create_runner_group(*runner_group).await
                             .expect("Could not create runner group");
                         self.refresh_runners().await;
                     }

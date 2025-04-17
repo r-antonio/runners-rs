@@ -1,24 +1,24 @@
+use std::fmt::{Display, Write};
 use std::ops::Deref;
-use crate::AppState;
-use crate::runners::ToLine;
-use crate::TEXT_FG_COLOR;
+use crate::{ALT_ROW_BG_COLOR, NORMAL_ROW_BG, SELECTED_STYLE};
 use ratatui::layout::Rect;
-use ratatui::prelude::{Buffer, Line, Style, Text, Widget};
-use ratatui::widgets::{Block, Borders, Clear, ListItem, ListState, Paragraph, Wrap};
+use ratatui::prelude::{Buffer, Color, Line, StatefulWidget, Style, Stylize, Text, Widget};
+use ratatui::widgets::{Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap};
 use std::rc::{Rc, Weak};
+use ratatui::symbols;
 
-pub struct UIList<T> {
+pub struct UIList<T> where T: Display {
     pub items: Vec<Rc<T>>,
-    pub filtered_items: Vec<Weak<T>>,
+    pub filtered_items: Vec<Rc<T>>,
     pub state: ListState,
     pub input_buffer: String,
     pub border_style: Style,
 }
 
-impl <T> UIList<T> {
+impl <'a, T: 'a + Display> UIList<T> where ListItem<'a>: From<&'a T> {
     pub fn new(vec: Vec<T>, border_style: Style) -> Self {
         let items: Vec<Rc<T>> = vec.into_iter().map(Rc::new).collect();
-        let filtered_items = items.iter().map(Rc::downgrade).collect();
+        let filtered_items = items.iter().map(Rc::clone).collect();
         UIList {
             items,
             filtered_items,
@@ -53,44 +53,79 @@ impl <T> UIList<T> {
     pub fn selected(&self) -> Option<&T> {
         self.state.selected().map(|idx| self.items[idx].deref())
     }
-    // pub fn render(&mut self, area: Rect, buf: &mut Buffer, title: &str) {
-    //     let block = Block::new()
-    //         .title(Line::raw(title).centered())
-    //         .borders(Borders::TOP)
-    //         .border_set(symbols::border::EMPTY)
-    //         .border_style(self.border_style)
-    //         .bg(NORMAL_ROW_BG);
-    //
-    //     // Iterate through all elements in the `items` and stylize them.
-    //     let items: Vec<ListItem> = self
-    //         .filtered_items
-    //         .iter()
-    //         .enumerate()
-    //         .map(|(i, it)| {
-    //             let color = alternate_colors(i);
-    //             let item = it.upgrade().unwrap().deref();
-    //             let line = item.to_line();
-    //             ListItem::from(line).bg(color)
-    //         })
-    //         .collect();
-    //
-    //     // Create a List from all list items and highlight the currently selected one
-    //     let list = List::new(items)
-    //         .block(block)
-    //         .highlight_style(SELECTED_STYLE)
-    //         .highlight_symbol(">")
-    //         .highlight_spacing(HighlightSpacing::Always);
-    //
-    //     // We need to disambiguate this trait method as both `Widget` and `StatefulWidget` share the
-    //     // same method name `render`.
-    //     StatefulWidget::render(list, area, buf, &mut self.state);
-    // }
+
+    pub fn update_filter(&mut self, c: char) {
+        self.add_to_input(c);
+        self.filter_items();
+    }
+
+    pub fn add_to_input(&mut self, c: char) {
+        self.input_buffer.write_char(c).unwrap();
+    }
+
+    pub fn remove_last_input(&mut self) {
+        self.input_buffer.pop();
+        self.filter_items();
+    }
+
+    pub fn filter_items(&mut self) {
+        self.filtered_items = self.items.iter()
+            .filter(|it| it.to_string().contains(&self.input_buffer))
+            .map(|it| Rc::clone(it))
+            .collect();
+    }
+
+    pub fn render(&'a mut self, area: Rect, buf: &mut Buffer, title: &str) {
+        let block = Block::new()
+            .title(Line::raw(title).centered())
+            .borders(Borders::TOP)
+            .border_set(symbols::border::EMPTY)
+            .border_style(self.border_style)
+            .bg(NORMAL_ROW_BG);
+
+        // Iterate through all elements in the `items` and stylize them.
+        let items: Vec<ListItem> = self
+            .filtered_items
+            .iter()
+            .enumerate()
+            .map(|(i, it)| {
+                let color = alternate_colors(i);
+                let item = it.deref();
+                ListItem::from(item).bg(color)
+            })
+            .collect();
+
+        // Create a List from all list items and highlight the currently selected one
+        let list = List::new(items)
+            .block(block)
+            .highlight_style(SELECTED_STYLE)
+            .highlight_symbol(">")
+            .highlight_spacing(HighlightSpacing::Always);
+
+        // We need to disambiguate this trait method as both `Widget` and `StatefulWidget` share the
+        // same method name `render`.
+        StatefulWidget::render(list, area, buf, &mut self.state);
+    }
+}
+
+const fn alternate_colors(i: usize) -> Color {
+    if i % 2 == 0 {
+        NORMAL_ROW_BG
+    } else {
+        ALT_ROW_BG_COLOR
+    }
 }
 
 pub enum RunnerOperation {
     AddLabel,
     RemoveLabel,
     ChangeGroup,
+}
+
+impl Display for RunnerOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
 }
 
 impl RunnerOperation {
@@ -106,12 +141,6 @@ impl RunnerOperation {
     }
 }
 
-impl ToLine for RunnerOperation {
-    fn to_line(&self) -> Line {
-        Line::styled(format!(" {}", &self.as_str()), TEXT_FG_COLOR)
-    }
-}
-
 impl From<&RunnerOperation> for ListItem<'_> {
     fn from(op: &RunnerOperation) -> Self {
         ListItem::new(format!("{} ", op.as_str()))
@@ -123,6 +152,12 @@ pub enum GroupOperation {
     CreateGroup,
 }
 
+impl Display for GroupOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 impl GroupOperation {
     pub fn all() -> Vec<GroupOperation> {
         vec![GroupOperation::CreateGroup, GroupOperation::AddRepo]
@@ -132,12 +167,6 @@ impl GroupOperation {
             GroupOperation::AddRepo => "Add repo",
             GroupOperation::CreateGroup => "Create group",
         }
-    }
-}
-
-impl ToLine for GroupOperation {
-    fn to_line(&self) -> Line {
-        Line::styled(format!(" {}", &self.as_str()), TEXT_FG_COLOR)
     }
 }
 
