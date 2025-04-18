@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::{Display, Formatter};
 use std::ops::Deref;
 use anyhow::Result;
 use cli_log::*;
@@ -52,18 +53,31 @@ pub struct LabelsBody {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct RepoResponse {
+pub struct ApiRepository {
     pub id: usize,
     pub name: String,
 }
+
+impl Display for ApiRepository {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.name)
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ApiRepositoriesResponse {
+    pub total_count: usize,
+    pub repositories: Vec<ApiRepository>,
+}
+
 pub struct RepoEndpoint<'c>(&'c Client);
 impl CustomEndpoint for RepoEndpoint<'_> {}
 
 impl <'c> RepoEndpoint<'c> {
-    pub async fn get_repo(&self, org: &str, repo: &str) -> Result<RepoResponse>{
+    pub async fn get_repo(&self, org: &str, repo: &str) -> Result<ApiRepository>{
         let endpoint = self.0.api_base.join(&format!("/repos/{}/{}", org, repo))?;
         debug!("GET {}", endpoint);
-        Ok(self.0.client.get(endpoint).send().await?.json::<RepoResponse>().await?)
+        Ok(self.0.client.get(endpoint).send().await?.json::<ApiRepository>().await?)
     }
 }
 
@@ -184,6 +198,12 @@ impl<'c> RunnersGroupsEndpoint<'c> {
         debug!("PUT {}", endpoint);
         self.0.client.put(endpoint).send().await?.error_for_status()?;
         Ok(())
+    }
+
+    pub async fn get_group_repos(&self, runner_group_id: usize) -> Result<ApiRepositoriesResponse> {
+        let endpoint = self.endpoint(&self.0.api_base, &format!("actions/runner-groups/{}/repositories", runner_group_id))?;
+        debug!("GET {}", endpoint);
+        Ok(self.0.client.get(endpoint).send().await?.json::<ApiRepositoriesResponse>().await?)
     }
 
 }

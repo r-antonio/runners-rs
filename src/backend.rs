@@ -1,4 +1,4 @@
-use crate::api::{ApiRunnerGroupCreate, Client, RunnerGroupVisibility};
+use crate::api::{ApiRepository, ApiRunnerGroupCreate, Client, RunnerGroupVisibility};
 use crate::config::Config;
 use crate::runners::{Runner, RunnerGroup};
 use cli_log::debug;
@@ -13,6 +13,7 @@ pub enum BackendMessage {
     DeleteLabel(usize, String),
     ChangeGroup(usize, usize),
     AddRepoToGroup(String, usize),
+    GetGroupRepos(usize),
     CreateRunnerGroup(Box<ApiRunnerGroupCreate>),
     AddRunnerToGroup(usize, usize),
 }
@@ -21,6 +22,7 @@ pub enum ApiMessage {
     Ok,
     RunnerList(Box<Vec<Runner>>),
     RunnerGroupList(Box<Vec<RunnerGroup>>),
+    GroupRepos(Box<Vec<ApiRepository>>)
 }
 
 pub struct Worker {
@@ -131,6 +133,14 @@ impl Worker {
                         self.client.runner_groups().create_runner_group(*runner_group).await
                             .expect("Could not create runner group");
                         self.refresh_runners().await;
+                    },
+                    BackendMessage::GetGroupRepos(runner_group_id) => {
+                        debug!("Getting group repos {}", runner_group_id);
+                        let result = self.client.runner_groups().get_group_repos(runner_group_id).await
+                            .expect("Could not get group repos");
+                        debug!("Fetched repos {:?}", result.repositories);
+                        self.tx.send(ApiMessage::GroupRepos(Box::new(result.repositories)))
+                            .expect("Could not send group repos response to frontend");
                     }
                     _ => {}
                 }

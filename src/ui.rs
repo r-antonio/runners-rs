@@ -4,29 +4,106 @@ use crate::{ALT_ROW_BG_COLOR, NORMAL_ROW_BG, SELECTED_STYLE};
 use ratatui::layout::Rect;
 use ratatui::prelude::{Buffer, Color, Line, StatefulWidget, Style, Stylize, Text, Widget};
 use ratatui::widgets::{Block, Borders, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap};
-use std::rc::{Rc, Weak};
+use std::rc::{Rc};
+use color_eyre::owo_colors::OwoColorize;
 use ratatui::symbols;
 
-pub struct UIList<T> where T: Display {
+pub struct FilterableList<T> where T: Display {
+    list: SelectableList<T>,
     pub items: Vec<Rc<T>>,
-    pub filtered_items: Vec<Rc<T>>,
-    pub state: ListState,
     pub input_buffer: String,
+}
+
+impl <T: Display> FilterableList<T> {
+    pub fn new(items: Vec<T>, style: Style) -> Self {
+        let list = SelectableList::new(items, style);
+        let cloned_items = list.items.iter().map(|x| Rc::clone(x)).collect();
+        FilterableList { list, items: cloned_items, input_buffer: String::new() }
+    }
+
+    pub fn with_first_selected(mut self) -> Self {
+        self.select_first();
+        self
+    }
+
+    pub fn render(&mut self, area: Rect, buf: &mut Buffer, title: &str) {
+        self.list.render(area, buf, title);
+    }
+
+    pub fn filter_items(&mut self) {
+        self.list.items = self.items.iter()
+            .filter(|it| it.to_string().contains(&self.input_buffer))
+            .map(|it| Rc::clone(it))
+            .collect();
+    }
+
+    pub fn state(&self) -> &ListState {
+        &self.list.state
+    }
+
+    pub fn filtered_items(&self) -> &Vec<Rc<T>> {
+        &self.list.items
+    }
+
+    pub fn select_first(&mut self) {
+        self.list.select_first();
+    }
+
+    pub fn select_last(&mut self) {
+        self.list.select_last();
+    }
+    pub fn select_next(&mut self) {
+        self.list.select_next();
+    }
+
+    pub fn select_previous(&mut self) {
+        self.list.select_previous();
+    }
+
+    pub fn select_none(&mut self) {
+        self.list.select_none();
+    }
+
+    pub fn selected(&self) -> Option<&T> {
+        self.list.selected()
+    }
+
+    pub fn update_filter(&mut self, c: char) {
+        self.add_to_input(c);
+        self.filter_items();
+    }
+
+    pub fn add_to_input(&mut self, c: char) {
+        self.input_buffer.write_char(c).unwrap();
+    }
+
+    pub fn remove_last_input(&mut self) {
+        self.input_buffer.pop();
+        self.filter_items();
+    }
+}
+
+pub struct SelectableList<T> where T: Display {
+    pub items: Vec<Rc<T>>,
+    pub state: ListState,
     pub border_style: Style,
 }
 
-impl <'a, T: 'a + Display> UIList<T> where ListItem<'a>: From<&'a T> {
+impl <T: Display> SelectableList<T> {
     pub fn new(vec: Vec<T>, border_style: Style) -> Self {
         let items: Vec<Rc<T>> = vec.into_iter().map(Rc::new).collect();
-        let filtered_items = items.iter().map(Rc::clone).collect();
-        UIList {
+        SelectableList {
             items,
-            filtered_items,
             state: ListState::default(),
-            input_buffer: String::new(),
             border_style,
         }
     }
+
+    pub fn set_items(&mut self, vec: Vec<T>) {
+        self.items = vec.into_iter().map(Rc::new).collect();
+        self.select_none();
+    }
+
     pub fn with_first_selected(mut self) -> Self {
         self.select_first();
         self
@@ -54,28 +131,7 @@ impl <'a, T: 'a + Display> UIList<T> where ListItem<'a>: From<&'a T> {
         self.state.selected().map(|idx| self.items[idx].deref())
     }
 
-    pub fn update_filter(&mut self, c: char) {
-        self.add_to_input(c);
-        self.filter_items();
-    }
-
-    pub fn add_to_input(&mut self, c: char) {
-        self.input_buffer.write_char(c).unwrap();
-    }
-
-    pub fn remove_last_input(&mut self) {
-        self.input_buffer.pop();
-        self.filter_items();
-    }
-
-    pub fn filter_items(&mut self) {
-        self.filtered_items = self.items.iter()
-            .filter(|it| it.to_string().contains(&self.input_buffer))
-            .map(|it| Rc::clone(it))
-            .collect();
-    }
-
-    pub fn render(&'a mut self, area: Rect, buf: &mut Buffer, title: &str) {
+    pub fn render(&mut self, area: Rect, buf: &mut Buffer, title: &str) {
         let block = Block::new()
             .title(Line::raw(title).centered())
             .borders(Borders::TOP)
@@ -85,13 +141,14 @@ impl <'a, T: 'a + Display> UIList<T> where ListItem<'a>: From<&'a T> {
 
         // Iterate through all elements in the `items` and stylize them.
         let items: Vec<ListItem> = self
-            .filtered_items
+            .items
             .iter()
             .enumerate()
             .map(|(i, it)| {
                 let color = alternate_colors(i);
                 let item = it.deref();
-                ListItem::from(item).bg(color)
+                let line = Line::from(item.to_string());
+                ListItem::new(line).bg(color)
             })
             .collect();
 
@@ -124,7 +181,12 @@ pub enum RunnerOperation {
 
 impl Display for RunnerOperation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
+        let value = match self {
+            RunnerOperation::AddLabel => "Add label",
+            RunnerOperation::RemoveLabel => "Remove label",
+            RunnerOperation::ChangeGroup => "Change group",
+        };
+        write!(f, "{}", value)
     }
 }
 
@@ -132,47 +194,28 @@ impl RunnerOperation {
     pub fn all() -> Vec<RunnerOperation> {
         vec![RunnerOperation::AddLabel, RunnerOperation::RemoveLabel, RunnerOperation::ChangeGroup]
     }
-    fn as_str(&self) -> &'static str {
-        match self {
-            RunnerOperation::AddLabel => "Add label",
-            RunnerOperation::RemoveLabel => "Remove label",
-            RunnerOperation::ChangeGroup => "Change group",
-        }
-    }
-}
-
-impl From<&RunnerOperation> for ListItem<'_> {
-    fn from(op: &RunnerOperation) -> Self {
-        ListItem::new(format!("{} ", op.as_str()))
-    }
 }
 
 pub enum GroupOperation {
     AddRepo,
     CreateGroup,
+    GetRepos,
 }
 
 impl Display for GroupOperation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.as_str())
+        let value = match self {
+            GroupOperation::AddRepo => "Add repo",
+            GroupOperation::CreateGroup => "Create group",
+            GroupOperation::GetRepos => "Get repos accesses",
+        };
+        write!(f, "{}", value)
     }
 }
 
 impl GroupOperation {
     pub fn all() -> Vec<GroupOperation> {
-        vec![GroupOperation::CreateGroup, GroupOperation::AddRepo]
-    }
-    fn as_str(&self) -> &'static str {
-        match self {
-            GroupOperation::AddRepo => "Add repo",
-            GroupOperation::CreateGroup => "Create group",
-        }
-    }
-}
-
-impl From<&GroupOperation> for ListItem<'_> {
-    fn from(op: &GroupOperation) -> Self {
-        ListItem::new(format!("{} ", op.as_str()))
+        vec![GroupOperation::CreateGroup, GroupOperation::GetRepos, GroupOperation::AddRepo]
     }
 }
 

@@ -1,10 +1,12 @@
 mod api;
 mod config;
 mod runners;
+mod runners_tab;
 mod backend;
 mod ui;
 mod cache;
 
+use std::cell::RefCell;
 use crate::backend::{ApiMessage, BackendMessage, Worker};
 use crate::config::read_dot_env;
 use crate::runners::{Runner, RunnerGroup, RunnerStatus};
@@ -26,7 +28,8 @@ use ratatui::{
     },
     DefaultTerminal,
 };
-use std::fmt::Write;
+use std::fmt::{Display, Write};
+use std::iter::Filter;
 use std::ops::Deref;
 use std::rc::{Rc, Weak};
 use std::time::Duration;
@@ -34,8 +37,9 @@ use color_eyre::owo_colors::OwoColorize;
 use crossterm::event::KeyModifiers;
 use ratatui::widgets::{BorderType, Tabs};
 use tokio::sync::mpsc;
-use crate::api::{ApiRunnerGroupCreate, RunnerGroupVisibility};
-use crate::ui::{RunnerOperation, Popup, UIList, GroupOperation};
+use crate::api::{ApiRepository, ApiRunnerGroupCreate, RunnerGroupVisibility};
+use crate::runners_tab::RunnersTab;
+use crate::ui::{RunnerOperation, Popup, SelectableList, GroupOperation, FilterableList};
 
 const TODO_HEADER_STYLE: Style = Style::new().fg(SLATE.c100).bg(BLUE.c800);
 const NORMAL_ROW_BG: Color = SLATE.c950;
@@ -60,22 +64,50 @@ impl RunnerList {
     }
 }
 
+struct PopupInfo {
+    title: String,
+    content: Box<dyn Fn() -> String>,
+    is_loading: bool,
+}
+
+impl PopupInfo {
+    fn loading() -> Self {
+        PopupInfo {
+            title: String::from("Loading"),
+            content: Box::new(||String::from("Loading...")),
+            is_loading: true
+        }
+    }
+
+    fn new(title: String, content: String) -> Self {
+        PopupInfo {
+            title,
+            content: Box::new(move || content.clone()),
+            is_loading: false,
+        }
+    }
+
+    fn new_dynamic(title: String, content_fn: Box<dyn Fn() -> String>) -> Self {
+        PopupInfo {
+            title,
+            content: content_fn,
+            is_loading: false,
+        }
+    }
+}
+
 struct AppState<'a> {
-    runner_groups_: Vec<Rc<RunnerGroup>>,
-    runners_: Vec<Rc<Runner>>,
-    runner_groups: UIList<RunnerGroup>,
-    runners: UIList<Runner>,
-    runner_ops: UIList<RunnerOperation>,
-    group_ops: UIList<GroupOperation>,
+    runners_tab: RunnersTab,
+    runner_groups: FilterableList<RunnerGroup>,
+    runner_ops: SelectableList<RunnerOperation>,
+    group_ops: SelectableList<GroupOperation>,
+    dynamic_list: SelectableList<Box<dyn Display>>,
     selected_tab: Tab,
-    selected_runner: Option<usize>,
-    selected_group: Option<usize>,
-    selected_label: ListState,
-    show_runner_labels: bool,
-    input_buffer: String,
+    selected_runner: Option<Runner>,
+    selected_group: Option<RunnerGroup>,
+    input_buffer: Rc<RefCell<String>>,
     should_exit: bool,
-    show_popup: bool,
-    loading: bool,
+    popup_content: Option<PopupInfo>,
     tx: &'a mpsc::UnboundedSender<BackendMessage>,
     api_rx: mpsc::UnboundedReceiver<ApiMessage>,
 }
@@ -91,28 +123,17 @@ impl <'a> Widget for &mut AppState<'a> {
         self.render_header(header_area, buf);
         AppState::render_footer(footer_area, buf);
         match self.selected_tab {
-            Tab::Runners => {
-                let mut list_title = String::from("Runners - ");
-                list_title.push_str(self.runners.input_buffer.as_str());
-                self.runners.render(main_area, buf, &list_title);
-            },
+            Tab::Runners => self.runners_tab.render(main_area, buf),
             Tab::RunnerOpSelection => {
-                let idx = self.selected_runner.unwrap();
-                let list_title = format!("Select operation - {}", self.runners.items[idx].name);
+                let runner = self.runners_tab.selected().unwrap();
+                let list_title = format!("Select operation - {}", runner.name);
                 self.runner_ops.render(main_area, buf, &list_title);
                 self.show_popup(main_area, buf);
             },
             Tab::RemoveLabels => {
-                let idx = self.selected_runner.unwrap();
-                let runner = &self.runners.items[idx];
+                let runner = self.runners_tab.selected().unwrap();
                 let list_title = format!("Remove labels - {}", runner.name);
-                let block = title_block(&list_title, self.selected_tab.style());
-
-                let items: Vec<ListItem> = runner.labels
-                    .iter()
-                    .map(|label|ListItem::from(label.deref()))
-                    .collect();
-                render_list(main_area, buf, block, items, &mut self.selected_label);
+                self.dynamic_list.render(main_area, buf, &list_title);
                 self.show_popup(main_area, buf);
             },
             Tab::RunnerGroups => {
@@ -120,8 +141,8 @@ impl <'a> Widget for &mut AppState<'a> {
                 self.runner_groups.render(main_area, buf, &list_title);
             }
             Tab::GroupOpSelection => {
-                let idx = self.selected_group.unwrap();
-                let list_title = format!("Select operation - {}", self.runner_groups.items[idx].name);
+                let group = self.selected_group.as_ref().unwrap();
+                let list_title = format!("Select operation - {}", group.name);
                 self.group_ops.render(main_area, buf, &list_title);
                 self.show_popup(main_area, buf);
             }
@@ -135,21 +156,17 @@ impl <'a> AppState<'a> {
         let runner_operations = RunnerOperation::all();
         let group_operations = GroupOperation::all();
         let mut state = AppState {
-            runners_: vec![],
-            runner_groups_: vec![],
-            runners: UIList::new(runners, Tab::Runners.style()).with_first_selected(),
-            runner_ops: UIList::new(runner_operations, Tab::RunnerOpSelection.style()).with_first_selected(),
-            runner_groups: UIList::new(runner_groups, Tab::RunnerGroups.style()).with_first_selected(),
-            group_ops: UIList::new(group_operations, Tab::GroupOpSelection.style()).with_first_selected(),
+            runners_tab: RunnersTab::new(runners),
+            runner_ops: SelectableList::new(runner_operations, Tab::RunnerOpSelection.style()).with_first_selected(),
+            runner_groups: FilterableList::new(runner_groups, Tab::RunnerGroups.style()).with_first_selected(),
+            group_ops: SelectableList::new(group_operations, Tab::GroupOpSelection.style()).with_first_selected(),
+            dynamic_list: SelectableList::new(vec![], Tab::RemoveLabels.style()),
             selected_tab,
             selected_runner: None,
             selected_group: None,
-            selected_label: ListState::default(),
-            input_buffer: String::new(),
+            input_buffer: Rc::new(RefCell::new(String::new())),
             should_exit: false,
-            show_runner_labels: false,
-            show_popup: false,
-            loading: false,
+            popup_content: None,
             tx,
             api_rx
         };
@@ -157,20 +174,19 @@ impl <'a> AppState<'a> {
     }
 
     fn show_popup(&self, area: Rect, buf: &mut Buffer) {
-        if self.show_popup || self.loading {
+        if let Some(popup) = &self.popup_content {
             let popup_area = Rect {
                 x: area.width / 4,
                 y: area.height / 3,
                 width: area.width / 2,
                 height: 3,
             };
-
-            if self.show_popup {
+            if !popup.is_loading {
                 Popup::default()
-                    .title("Input new label")
-                    .content(format!("{}_", self.input_buffer.as_str()))
+                    .title(popup.title.as_str())
+                    .content((popup.content)())
                     .render(popup_area, buf);
-            } else if self.loading {
+            } else {
                 Popup::default()
                     .title("Loading")
                     .content(format!("Loading ..."))
@@ -192,10 +208,19 @@ impl <'a> AppState<'a> {
                     ApiMessage::Ok => self.toggle_loading(),
                     ApiMessage::RunnerList(runners) => self.set_runners(*runners),
                     ApiMessage::RunnerGroupList(groups) => self.set_runner_groups(*groups),
+                    ApiMessage::GroupRepos(repos) => self.set_group_repos(*repos),
                 }
             }
         }
         Ok(())
+    }
+
+    fn add_to_input(&mut self, c: char) {
+        self.input_buffer.borrow_mut().push(c);
+    }
+
+    fn remove_last_input(&mut self) {
+        self.input_buffer.borrow_mut().pop();
     }
 
     fn handle_key(&mut self, key: KeyEvent) {
@@ -203,12 +228,10 @@ impl <'a> AppState<'a> {
             return;
         }
         if key.code == KeyCode::Esc {
-            if self.show_popup {
-                self.show_popup = false;
-            } else {
-                self.should_exit = true;
+            match self.popup_content {
+                Some(_) => self.popup_content = None,
+                None => self.should_exit = true,
             }
-            return;
         }
         if key.code == KeyCode::Tab {
             self.selected_tab = match self.selected_tab {
@@ -218,31 +241,38 @@ impl <'a> AppState<'a> {
             }
         }
         match self.selected_tab {
-            Tab::Runners => match key.code {
-                KeyCode::Left => self.runners.select_none(),
-                KeyCode::Down => self.runners.select_next(),
-                KeyCode::Up => self.runners.select_previous(),
-                KeyCode::Home => self.runners.select_first(),
-                KeyCode::End => self.runners.select_last(),
-                KeyCode::Right | KeyCode::Enter => self.advance_with_selected_runner(),
-                KeyCode::Backspace => self.runners.remove_last_input(),
-                KeyCode::Char(c) => self.runners.update_filter(c),
-                _ => {}
-            },
+            Tab::Runners => self.selected_tab = self.runners_tab.handle_input(key),
             Tab::RunnerOpSelection => {
                 match key.code {
                     KeyCode::Up => self.runner_ops.select_previous(),
                     KeyCode::Down => self.runner_ops.select_next(),
                     KeyCode::Left => self.selected_tab = Tab::Runners,
+                    KeyCode::Char(c) => match self.popup_content {
+                        Some(_) => self.add_to_input(c),
+                        _ => {}
+                    }
+                    KeyCode::Backspace => self.remove_last_input(),
                     KeyCode::Right | KeyCode::Enter => match self.runner_ops.selected() {
                         Some(RunnerOperation::AddLabel) => {
-                            if !self.show_popup {
-                                self.show_input_popup()
-                            } else {
-                                self.run_input_op()
+                            match self.popup_content {
+                                Some(_) => self.run_input_op(),
+                                None => {
+                                    let input_clone = Rc::clone(&self.input_buffer);
+                                    self.show_input_popup(
+                                        PopupInfo::new_dynamic(String::from("Input new label:"),
+                                                               Box::new(move || format!("{}_", input_clone.borrow()))
+                                        ))
+                                }
                             }
                         },
                         Some(RunnerOperation::RemoveLabel) => {
+                            let runner = self.runners_tab.selected().unwrap();
+                            let label_items = runner.labels
+                                .iter()
+                                .cloned()
+                                .map(|label| Box::new(label) as Box<dyn Display>)
+                                .collect();
+                            self.dynamic_list.set_items(label_items);
                             self.selected_tab = Tab::RemoveLabels
                         },
                         Some(RunnerOperation::ChangeGroup) => {
@@ -250,15 +280,13 @@ impl <'a> AppState<'a> {
                         }
                         _ => {}
                     },
-                    KeyCode::Char(c) => self.runner_ops.update_filter(c),
-                    KeyCode::Backspace => self.runner_ops.remove_last_input(),
                     _ => {}
                 }
             }
             Tab::RemoveLabels => {
                 match key.code {
-                    KeyCode::Up => self.selected_label.select_previous(),
-                    KeyCode::Down => self.selected_label.select_next(),
+                    KeyCode::Up => self.dynamic_list.select_previous(),
+                    KeyCode::Down => self.dynamic_list.select_next(),
                     KeyCode::Left => self.selected_tab = Tab::RunnerOpSelection,
                     KeyCode::Enter => self.remove_label(),
                     _ => {}
@@ -269,6 +297,8 @@ impl <'a> AppState<'a> {
                     KeyCode::Up => self.runner_groups.select_previous(),
                     KeyCode::Down => self.runner_groups.select_next(),
                     KeyCode::Right | KeyCode::Enter => self.advance_with_selected_group(),
+                    KeyCode::Char(c) => self.runner_groups.update_filter(c),
+                    KeyCode::Backspace => self.runner_groups.remove_last_input(),
                     _ => {}
                 }
             }
@@ -277,16 +307,34 @@ impl <'a> AppState<'a> {
                     KeyCode::Up => self.group_ops.select_previous(),
                     KeyCode::Down => self.group_ops.select_next(),
                     KeyCode::Left => self.selected_tab = Tab::RunnerGroups,
+                    KeyCode::Char(c) => match self.popup_content {
+                        Some(_) => self.add_to_input(c),
+                        _ => {}
+                    }
+                    KeyCode::Backspace => self.remove_last_input(),
                     KeyCode::Right | KeyCode::Enter => match self.group_ops.selected() {
-                        Some(GroupOperation::AddRepo) => self.show_popup_or_execute(),
+                        Some(GroupOperation::AddRepo) => {
+                            let input_clone = Rc::clone(&self.input_buffer);
+                            self.show_popup_or_execute(
+                                PopupInfo::new_dynamic(String::from("Input repo name:"),
+                                               Box::new(move ||format!("{}_", input_clone.borrow()))
+                                )
+                            )
+                        },
                         Some(GroupOperation::CreateGroup) => {
                             debug!("This should be anywhere else");
-                            self.show_popup_or_execute();
+                            let input_clone = Rc::clone(&self.input_buffer);
+                            self.show_popup_or_execute(
+                                PopupInfo::new_dynamic(String::from("Input group name:"),
+                                               Box::new(move || format!("{}_", input_clone.borrow()))
+                                )
+                            );
+                        },
+                        Some(GroupOperation::GetRepos) => {
+                            self.run_input_op();
                         }
                         _ => {}
                     },
-                    KeyCode::Char(c) => self.group_ops.update_filter(c),
-                    KeyCode::Backspace => self.group_ops.remove_last_input(),
                     _ => {}
                 }
             }
@@ -294,11 +342,10 @@ impl <'a> AppState<'a> {
 
     }
 
-    fn show_popup_or_execute(&mut self) {
-        if !self.show_popup {
-            self.show_input_popup();
-        } else {
-            self.run_input_op();
+    fn show_popup_or_execute(&mut self, popup_info: PopupInfo) {
+        match self.popup_content {
+            None => self.show_input_popup(popup_info),
+            _ => self.run_input_op()
         }
     }
 
@@ -326,19 +373,17 @@ impl <'a> AppState<'a> {
             .render(area, buf);
     }
 
-    fn show_input_popup(&mut self) {
-        self.show_popup = true;
+    fn show_input_popup(&mut self, popup_info: PopupInfo) {
+        self.popup_content = Some(popup_info);
     }
 
     fn run_input_op(&mut self) {
-        self.show_popup = false;
-        self.loading = true;
-        let input = std::mem::replace(&mut self.input_buffer, String::new());
+        self.popup_content = Some(PopupInfo::loading());
+        let input = std::mem::replace(&mut *self.input_buffer.borrow_mut(), String::new());
         match self.selected_tab {
             Tab::RunnerOpSelection => {
-                let idx = self.selected_runner.unwrap();
-                let runner = self.runners.filtered_items[idx].id;
-                self.tx.send(BackendMessage::AddLabel(runner, input))
+                let runner = self.selected_runner.as_ref().unwrap();
+                self.tx.send(BackendMessage::AddLabel(runner.id, input))
                     .expect("Could not send add label command to backend");
             }
             Tab::GroupOpSelection => {
@@ -359,6 +404,12 @@ impl <'a> AppState<'a> {
                         self.tx.send(BackendMessage::CreateRunnerGroup(Box::new(group)))
                             .expect("Could not send create runner command to backend");
                     }
+                    GroupOperation::GetRepos => {
+                        let group = self.runner_groups.selected().unwrap();
+                        self.tx.send(BackendMessage::GetGroupRepos(group.id))
+                            .expect("Could not send get group repos command to backend");
+                        self.selected_tab = Tab::RemoveLabels
+                    }
                 }
             }
             _ => {}
@@ -366,45 +417,47 @@ impl <'a> AppState<'a> {
     }
 
     fn remove_label(&mut self) {
-        self.loading = true;
-        let idx = self.selected_runner.unwrap();
-        let selected_label = self.selected_label.selected().unwrap();
-        let runner = &self.runners.filtered_items[idx];
-        let label = runner.labels[selected_label].clone();
+        self.popup_content = Some(PopupInfo::loading());
+        let runner = self.selected_runner.as_ref().unwrap();
+        let selected_label = self.dynamic_list.selected().unwrap();
+        let label = selected_label.to_string();
         self.tx.send(BackendMessage::DeleteLabel(runner.id, label))
             .expect("Could not send delete label command to backend");
     }
 
-    fn advance_with_selected_runner(&mut self) {
-        if let Some(_) = self.runners.state.selected() {
-            self.selected_runner = self.runners.state.selected();
-            self.selected_tab = Tab::RunnerOpSelection;
-        }
-    }
-
     fn advance_with_selected_group(&mut self) {
-        if let Some(_) = self.runner_groups.selected() {
-            self.selected_group = self.runner_groups.state.selected();
+        if let Some(group) = self.runner_groups.selected() {
+            self.selected_group = Some(group.clone());
             self.selected_tab = Tab::GroupOpSelection;
         }
     }
 
     fn toggle_loading(&mut self) {
-        if self.loading {
-            self.loading = false;
+        if let Some(popup) = &self.popup_content {
+            if popup.is_loading {
+                self.popup_content = None
+            }
         }
     }
 
     fn set_runners(&mut self, runners: Vec<Runner>) {
+        debug!("Setting runners...");
         self.toggle_loading();
-        self.runners.items = runners.into_iter().map(|r| Rc::new(r)).collect();
-        self.runners.filter_items();
+        self.runners_tab.set_runners(runners);
         self.selected_tab = Tab::Runners;
     }
 
     fn set_runner_groups(&mut self, groups: Vec<RunnerGroup>) {
         self.runner_groups.items = groups.into_iter().map(|g| Rc::new(g)).collect();
         self.runner_groups.filter_items();
+    }
+
+    fn set_group_repos(&mut self, repos: Vec<ApiRepository>) {
+        self.toggle_loading();
+        let display_items = repos.into_iter()
+            .map(|it|Box::new(it) as Box<dyn Display>)
+            .collect();
+        self.dynamic_list.set_items(display_items);
     }
 }
 
@@ -473,30 +526,4 @@ async fn main() -> Result<()> {
     let app_result = app_state.run(terminal);
     ratatui::restore();
     app_result
-}
-
-fn render_list(area: Rect, buf: &mut Buffer, block: Block, items: Vec<ListItem<'_>>, state: &mut ListState) {
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(SELECTED_STYLE)
-        .highlight_symbol(">")
-        .highlight_spacing(HighlightSpacing::Always);
-    StatefulWidget::render(list, area, buf, state);
-}
-
-fn title_block(title: &str, style: Style) -> Block {
-    Block::new()
-        .title(Line::raw(title).centered())
-        .borders(Borders::TOP)
-        .border_set(symbols::border::EMPTY)
-        .border_style(style)
-        .bg(NORMAL_ROW_BG)
-}
-
-const fn alternate_colors(i: usize) -> Color {
-    if i % 2 == 0 {
-        NORMAL_ROW_BG
-    } else {
-        ALT_ROW_BG_COLOR
-    }
 }
