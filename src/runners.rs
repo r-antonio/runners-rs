@@ -1,11 +1,24 @@
 use crate::api::{ApiRunner, ApiRunnerGroup, RunnerGroupVisibility};
 use std::fmt::Display;
+use std::str::FromStr;
 
 #[derive(Debug, Clone)]
 pub enum RunnerStatus {
     Online,
     Offline,
     Busy,
+}
+
+impl FromStr for RunnerStatus {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "online" => Ok(RunnerStatus::Online),
+            "offline" => Ok(RunnerStatus::Offline),
+            "busy" => Ok(RunnerStatus::Busy),
+            _ => Err(format!("Unknown runner status: {}", s)),
+        }
+    }
 }
 
 impl Display for RunnerStatus {
@@ -42,7 +55,7 @@ impl From<ApiRunner> for Runner {
         let status = if runner.busy {
             RunnerStatus::Busy
         } else {
-            RunnerStatus::Online
+            RunnerStatus::from_str(&runner.status).unwrap()
         };
         Runner::new(
             runner.id,
