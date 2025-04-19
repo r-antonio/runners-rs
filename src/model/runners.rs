@@ -1,4 +1,4 @@
-use crate::api::{ApiRunner, ApiRunnerGroup, RunnerGroupVisibility};
+use crate::client::api::{ApiRunner, ApiRunnerGroup, RunnerGroupVisibility};
 use std::fmt::Display;
 use std::str::FromStr;
 
@@ -107,5 +107,51 @@ impl From<ApiRunnerGroup> for RunnerGroup {
             group.name,
             group.visibility
         )
+    }
+}
+
+pub enum RunnerOperation {
+    AddLabel,
+    RemoveLabel,
+    ChangeGroup,
+}
+
+impl Display for RunnerOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            RunnerOperation::AddLabel => "Add label",
+            RunnerOperation::RemoveLabel => "Remove label",
+            RunnerOperation::ChangeGroup => "Change group",
+        };
+        write!(f, "{}", value)
+    }
+}
+
+impl RunnerOperation {
+    pub fn all() -> Vec<RunnerOperation> {
+        vec![RunnerOperation::AddLabel, RunnerOperation::RemoveLabel, RunnerOperation::ChangeGroup]
+    }
+}
+
+pub enum GroupOperation {
+    AddRepo,
+    CreateGroup,
+    GetRepos,
+}
+
+impl Display for GroupOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            GroupOperation::AddRepo => "Add repo",
+            GroupOperation::CreateGroup => "Create group",
+            GroupOperation::GetRepos => "Get repos accesses",
+        };
+        write!(f, "{}", value)
+    }
+}
+
+impl GroupOperation {
+    pub fn all() -> Vec<GroupOperation> {
+        vec![GroupOperation::CreateGroup, GroupOperation::GetRepos, GroupOperation::AddRepo]
     }
 }

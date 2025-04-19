@@ -7,7 +7,7 @@ use reqwest::header::HeaderMap;
 use reqwest::{Url};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
-use crate::cache::Cache;
+use crate::utils::cache::Cache;
 
 pub struct Client {
     api_base: Url,
@@ -186,7 +186,7 @@ impl<'c> RunnersGroupsEndpoint<'c> {
         Ok(self.0.client.post(endpoint).json(&runner_group).send().await?.json::<ApiRunnerGroup>().await?)
     }
 
-    pub async fn add_runner_to_group(&self, runner_group_id: usize, runner_id: usize) -> Result<()>{
+    pub async fn add_runner_to_group(&self, runner_id: usize, runner_group_id: usize) -> Result<()>{
         let endpoint = self.endpoint(&self.0.api_base, &format!("actions/runner-groups/{}/runners/{}", runner_group_id, runner_id))?;
         debug!("PUT {}", endpoint);
         self.0.client.put(endpoint).send().await?.error_for_status()?;

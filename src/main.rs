@@ -1,18 +1,16 @@
-mod api;
-mod config;
-mod runners;
-mod runners_tab;
 mod backend;
 mod ui;
-mod cache;
-mod groups_tab;
+mod tabs;
+mod client;
+mod model;
+mod utils;
 
-use crate::api::ApiRepository;
+use client::api::ApiRepository;
 use crate::backend::{ApiMessage, BackendMessage, Worker};
-use crate::config::read_dot_env;
-use crate::groups_tab::RunnersGroupsTab;
-use crate::runners::{Runner, RunnerGroup};
-use crate::runners_tab::RunnersTab;
+use utils::config::read_dot_env;
+use tabs::groups_tab::RunnersGroupsTab;
+use model::runners::{Runner, RunnerGroup};
+use tabs::runners_tab::RunnersTab;
 use crate::ui::Popup;
 use cli_log::*;
 use color_eyre::owo_colors::OwoColorize;

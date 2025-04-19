@@ -1,19 +1,18 @@
+use crate::backend::BackendMessage;
+use crate::model::runners::{Runner, RunnerOperation};
+use crate::ui::{FilterableList, SelectableList};
+use crate::{show_popup, PopupInfo, TODO_HEADER_STYLE};
+use crossterm::event::{KeyCode, KeyEvent};
+use ratatui::prelude::{Buffer, Rect};
 use std::cell::RefCell;
 use std::fmt::Display;
 use std::rc::Rc;
-use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::prelude::{Buffer, Color, Rect};
 use tokio::sync::mpsc;
-use crate::runners::Runner;
-use crate::{show_popup, PopupInfo, Tab, TODO_HEADER_STYLE};
-use crate::backend::BackendMessage;
-use crate::ui::{FilterableList, RunnerOperation, SelectableList};
 
 enum Stage {
     SelectRunner,
     SelectOp,
     RemoveLabels,
-    AddToGroup,
 }
 
 pub struct RunnersTab<'a> {
@@ -30,7 +29,7 @@ impl <'a> RunnersTab<'a> {
     pub fn new(runners: Vec<Runner>, tx: &mpsc::UnboundedSender<BackendMessage>) -> RunnersTab {
         RunnersTab {
             runners: FilterableList::new(runners, TODO_HEADER_STYLE).with_first_selected(),
-            operations: SelectableList::new(RunnerOperation::all(), TODO_HEADER_STYLE.bg(Color::Red)).with_first_selected(),
+            operations: SelectableList::new(RunnerOperation::all(), TODO_HEADER_STYLE).with_first_selected(),
             stage: Stage::SelectRunner,
             dynamic_list: SelectableList::new(vec![], TODO_HEADER_STYLE),
             input_buffer: Rc::new(RefCell::new(String::new())),
@@ -82,9 +81,6 @@ impl <'a> RunnersTab<'a> {
                 let runner = self.selected().unwrap();
                 let list_title = format!("Remove labels - {}", runner.name);
                 self.dynamic_list.render(area, buf, &list_title);
-            },
-            Stage::AddToGroup => {
-                //let groups = self.runners.items.iter().map(|r|r.group).collect();
             }
         }
         show_popup(&self.popup_content, area, buf);
@@ -109,11 +105,10 @@ impl <'a> RunnersTab<'a> {
 
     fn add_to_group(&mut self) {
         self.popup_content = Some(PopupInfo::loading());
+        let input = std::mem::replace(&mut *self.input_buffer.borrow_mut(), String::new());
         let runner = self.selected().unwrap();
-        let selected_group = self.dynamic_list.selected().unwrap();
-        let group = selected_group.to_string();
-        // self.tx.send(BackendMessage::AddRunnerToGroup(runner.id, group))
-        //     .expect("Could not send delete label command to backend");
+        self.tx.send(BackendMessage::ChangeGroup(runner.id, input))
+            .expect("Could not send change group command to backend");
     }
 
     pub fn handle_input(&mut self, event: KeyEvent) -> bool {
@@ -170,7 +165,16 @@ impl <'a> RunnersTab<'a> {
                             self.stage = Stage::RemoveLabels
                         },
                         Some(RunnerOperation::ChangeGroup) => {
-                            self.stage = Stage::AddToGroup
+                            match self.popup_content {
+                                Some(_) => self.add_to_group(),
+                                None => {
+                                    let input_clone = Rc::clone(&self.input_buffer);
+                                    self.popup_content = Some(
+                                        PopupInfo::new_dynamic(String::from("Input group name:"),
+                                                               Box::new(move || format!("{}_", input_clone.borrow()))
+                                        ))
+                                }
+                            }
                         }
                         _ => {}
                     },
@@ -183,15 +187,6 @@ impl <'a> RunnersTab<'a> {
                     KeyCode::Down => self.dynamic_list.select_next(),
                     KeyCode::Left => self.stage = Stage::SelectOp,
                     KeyCode::Enter => self.remove_label(),
-                    _ => {}
-                }
-            }
-            Stage::AddToGroup => {
-                match event.code {
-                    KeyCode::Up => self.dynamic_list.select_previous(),
-                    KeyCode::Down => self.dynamic_list.select_next(),
-                    KeyCode::Left => self.stage = Stage::SelectOp,
-                    KeyCode::Enter => self.add_to_group(),
                     _ => {}
                 }
             }

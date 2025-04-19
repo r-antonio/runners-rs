@@ -1,6 +1,6 @@
-use crate::api::{ApiRepository, ApiRunnerGroupCreate, Client, RunnerGroupVisibility};
-use crate::config::Config;
-use crate::runners::{Runner, RunnerGroup};
+use crate::client::api::{ApiRepository, ApiRunnerGroupCreate, Client, RunnerGroupVisibility};
+use crate::model::runners::{Runner, RunnerGroup};
+use crate::utils::config::Config;
 use cli_log::debug;
 use reqwest::header::{HeaderMap, HeaderValue};
 use std::sync::Arc;
@@ -11,11 +11,10 @@ pub enum BackendMessage {
     FetchGroups,
     AddLabel(usize, String),
     DeleteLabel(usize, String),
-    ChangeGroup(usize, usize),
+    ChangeGroup(usize, String),
     AddRepoToGroup(String, usize),
     GetGroupRepos(usize),
     CreateRunnerGroup(Box<ApiRunnerGroupCreate>),
-    AddRunnerToGroup(usize, usize),
 }
 
 pub enum ApiMessage {
@@ -113,9 +112,13 @@ impl Worker {
                             .expect("Could not remove label");
                         self.refresh_runners().await;
                     }
-                    BackendMessage::ChangeGroup(runner_id, group_id) => {
-                        debug!("Changing group of runner {} to group {}", runner_id, group_id);
-                        self.client.runner_groups().add_runner_to_group(runner_id, group_id).await
+                    BackendMessage::ChangeGroup(runner_id, group_name) => {
+                        debug!("Changing group of runner {} to group {}", runner_id, group_name);
+                        let group = match self.client.runner_groups().get_all(false).await {
+                            Ok(response) => response.runner_groups.into_iter().find(|r|r.name == group_name).unwrap(),
+                            Err(e) => panic!("Error getting runner group {}: {}", group_name, e),
+                        };
+                        self.client.runner_groups().add_runner_to_group(runner_id, group.id).await
                             .expect("Could not add runner to group");
                         self.refresh_runners().await;
                     }
@@ -142,7 +145,6 @@ impl Worker {
                         self.tx.send(ApiMessage::GroupRepos(Box::new(result.repositories)))
                             .expect("Could not send group repos response to frontend");
                     }
-                    _ => {}
                 }
             }
         }

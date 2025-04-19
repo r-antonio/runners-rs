@@ -7,11 +7,11 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::prelude::Color;
 use tokio::sync::mpsc;
-use crate::runners::{RunnerGroup};
+use crate::model::runners::{GroupOperation, RunnerGroup};
 use crate::{show_popup, PopupInfo, Tab, TODO_HEADER_STYLE};
-use crate::api::{ApiRepository, ApiRunnerGroupCreate, RunnerGroupVisibility};
+use crate::client::api::{ApiRepository, ApiRunnerGroupCreate, RunnerGroupVisibility};
 use crate::backend::BackendMessage;
-use crate::ui::{FilterableList, GroupOperation, RunnerOperation, SelectableList};
+use crate::ui::{FilterableList, SelectableList};
 
 enum Stage {
     SelectGroup,
@@ -33,11 +33,12 @@ pub struct RunnersGroupsTab<'a> {
 
 impl <'a> RunnersGroupsTab<'a> {
     pub fn new(groups: Vec<RunnerGroup>, tx: &'a mpsc::UnboundedSender<BackendMessage>) -> Self {
+        let style = TODO_HEADER_STYLE.bg(Color::Green);
         RunnersGroupsTab {
-            groups: FilterableList::new(groups, TODO_HEADER_STYLE.bg(Color::Green)).with_first_selected(),
-            operations: SelectableList::new(GroupOperation::all(), TODO_HEADER_STYLE.bg(Color::LightRed)).with_first_selected(),
+            groups: FilterableList::new(groups, style).with_first_selected(),
+            operations: SelectableList::new(GroupOperation::all(), style).with_first_selected(),
             stage: Stage::SelectGroup,
-            dynamic_list: SelectableList::new(vec![], TODO_HEADER_STYLE),
+            dynamic_list: SelectableList::new(vec![], style),
             input_buffer: Rc::new(RefCell::new(String::new())),
             popup_content: None,
             tx
